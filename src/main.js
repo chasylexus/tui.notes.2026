@@ -319,7 +319,7 @@ app.innerHTML = `
     <aside id="folders-panel" class="panel folders-panel">
       <div class="panel-header">
         <span class="panel-title">Folders</span>
-        <div class="panel-header-actions">
+        <div id="folders-header-actions" class="panel-header-actions">
           <button id="new-folder-btn" class="panel-icon-btn" title="New folder" aria-label="New folder" type="button">
             <span class="ui-icon">${ICONS.newFolder}</span>
           </button>
@@ -343,8 +343,10 @@ app.innerHTML = `
     <div id="folders-resizer" class="panel-resizer folders-resizer" role="separator" aria-label="Resize folders panel"></div>
 
     <aside id="notes-panel" class="panel notes-panel">
-      <div class="panel-header">
-        <span id="notes-title" class="panel-title">All Notes</span>
+      <div class="panel-header notes-panel-header">
+        <div id="notes-leading" class="notes-leading">
+          <span id="notes-title" class="panel-title">All Notes</span>
+        </div>
         <div class="panel-header-actions">
           <button id="new-note-btn" class="panel-icon-btn" title="New note" aria-label="New note" type="button">
             <span class="ui-icon">${ICONS.newNote}</span>
@@ -380,11 +382,13 @@ app.innerHTML = `
 const elements = {
   appShell: document.querySelector(".app-shell"),
   foldersPanel: document.querySelector("#folders-panel"),
+  foldersHeaderActions: document.querySelector("#folders-header-actions"),
   folderList: document.querySelector("#folder-list"),
   trashBtn: document.querySelector("#trash-btn"),
   trashCount: document.querySelector("#trash-count"),
   foldersResizer: document.querySelector("#folders-resizer"),
   notesPanel: document.querySelector("#notes-panel"),
+  notesLeading: document.querySelector("#notes-leading"),
   notesTitle: document.querySelector("#notes-title"),
   noteList: document.querySelector("#note-list"),
   notesResizer: document.querySelector("#notes-resizer"),
@@ -481,6 +485,77 @@ function isDesktopLayout() {
   return window.innerWidth > DESKTOP_BREAKPOINT;
 }
 
+function moveToggleButton(
+  targetContainer,
+  beforeElement = null,
+  animate = false,
+) {
+  const toggleButton = elements.toggleFoldersBtn;
+  if (!(toggleButton instanceof HTMLElement) || !(targetContainer instanceof HTMLElement)) {
+    return;
+  }
+
+  if (toggleButton.parentElement === targetContainer) {
+    if (!beforeElement || toggleButton.nextElementSibling === beforeElement) {
+      return;
+    }
+  }
+
+  const firstRect = toggleButton.getBoundingClientRect();
+
+  if (beforeElement instanceof HTMLElement && beforeElement.parentElement === targetContainer) {
+    targetContainer.insertBefore(toggleButton, beforeElement);
+  } else {
+    targetContainer.appendChild(toggleButton);
+  }
+
+  if (!animate) {
+    toggleButton.style.transform = "";
+    toggleButton.style.transition = "";
+    toggleButton.classList.remove("is-flying");
+    return;
+  }
+
+  const lastRect = toggleButton.getBoundingClientRect();
+  const deltaX = firstRect.left - lastRect.left;
+  const deltaY = firstRect.top - lastRect.top;
+
+  if (
+    !Number.isFinite(deltaX) ||
+    !Number.isFinite(deltaY) ||
+    (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5)
+  ) {
+    return;
+  }
+
+  toggleButton.classList.add("is-flying");
+  toggleButton.style.transition = "none";
+  toggleButton.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
+
+  requestAnimationFrame(() => {
+    toggleButton.style.transition = "transform 170ms ease";
+    toggleButton.style.transform = "translate(0, 0)";
+  });
+
+  const finishAnimation = () => {
+    toggleButton.style.transform = "";
+    toggleButton.style.transition = "";
+    toggleButton.classList.remove("is-flying");
+  };
+
+  toggleButton.addEventListener("transitionend", finishAnimation, { once: true });
+  setTimeout(finishAnimation, 260);
+}
+
+function syncToggleButtonPlacement(animate = false) {
+  const shouldBeInNotesHeader = isDesktopLayout() && layoutPrefs.foldersCollapsed;
+  if (shouldBeInNotesHeader) {
+    moveToggleButton(elements.notesLeading, elements.notesTitle, animate);
+  } else {
+    moveToggleButton(elements.foldersHeaderActions, null, animate);
+  }
+}
+
 function updateFoldersToggleButtonState() {
   const collapsed = Boolean(layoutPrefs.foldersCollapsed) && isDesktopLayout();
   elements.toggleFoldersBtn.classList.toggle("is-collapsed", collapsed);
@@ -491,7 +566,10 @@ function updateFoldersToggleButtonState() {
   );
 }
 
-function applyLayoutPrefs(shouldPersist = true) {
+function applyLayoutPrefs(
+  shouldPersist = true,
+  { syncToggle = true, animateToggle = false } = {},
+) {
   if (!isDesktopLayout()) {
     elements.appShell.classList.remove("folders-collapsed");
     elements.foldersPanel.style.width = "";
@@ -501,6 +579,9 @@ function applyLayoutPrefs(shouldPersist = true) {
     elements.foldersResizer.hidden = true;
     elements.notesResizer.hidden = true;
     elements.toggleFoldersBtn.disabled = true;
+    if (syncToggle) {
+      syncToggleButtonPlacement(animateToggle);
+    }
     updateFoldersToggleButtonState();
     return;
   }
@@ -531,6 +612,9 @@ function applyLayoutPrefs(shouldPersist = true) {
   elements.foldersResizer.hidden = layoutPrefs.foldersCollapsed;
   elements.notesResizer.hidden = false;
   elements.toggleFoldersBtn.disabled = false;
+  if (syncToggle) {
+    syncToggleButtonPlacement(animateToggle);
+  }
   updateFoldersToggleButtonState();
 
   if (shouldPersist) {
@@ -543,8 +627,18 @@ function toggleFoldersPanel() {
     return;
   }
 
-  layoutPrefs.foldersCollapsed = !layoutPrefs.foldersCollapsed;
-  applyLayoutPrefs(true);
+  const nextCollapsed = !layoutPrefs.foldersCollapsed;
+  layoutPrefs.foldersCollapsed = nextCollapsed;
+
+  if (nextCollapsed) {
+    syncToggleButtonPlacement(true);
+    applyLayoutPrefs(true, { syncToggle: false });
+    return;
+  }
+
+  applyLayoutPrefs(false, { syncToggle: false });
+  syncToggleButtonPlacement(true);
+  persistLayoutPrefs();
 }
 
 function startResize(panel, event) {
@@ -1636,14 +1730,20 @@ function formatUpdatedAt(timestamp) {
   if (!timestamp) {
     return "";
   }
-  return new Date(timestamp).toLocaleString();
+  const date = new Date(timestamp);
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
 }
 
 function formatDeletedAt(timestamp) {
   if (!timestamp) {
     return "";
   }
-  return `Deleted ${new Date(timestamp).toLocaleString()}`;
+  return `Deleted ${formatUpdatedAt(timestamp)}`;
 }
 
 function openContextMenu(items, x, y, target) {

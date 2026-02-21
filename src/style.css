@@ -34,10 +34,6 @@ body.dark {
   overflow: hidden;
 }
 
-.app-shell.folders-collapsed .folders-panel > * {
-  display: none;
-}
-
 .panel {
   display: flex;
   flex-direction: column;
@@ -114,6 +110,25 @@ body.dark.is-resizing .panel-resizer::before {
   gap: 6px;
 }
 
+.notes-panel-header {
+  gap: 8px;
+}
+
+.notes-leading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.notes-leading .panel-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .panel-icon-btn {
   width: 30px;
   height: 30px;
@@ -138,6 +153,11 @@ body.dark.is-resizing .panel-resizer::before {
 
 .panel-icon-btn.is-collapsed .ui-icon {
   transform: scaleX(-1);
+}
+
+.panel-icon-btn.is-flying {
+  pointer-events: none;
+  will-change: transform;
 }
 
 .ui-icon {
@@ -727,6 +747,23 @@ body.dark .chart-tooltip-none {
 
 .toastui-editor-defaultUI-toolbar .export-split-caret:not(:disabled):hover {
   border-left-color: #dadde6;
+}
+
+/* Match native dark toolbar hover for export split buttons. */
+.toastui-editor-dark .toastui-editor-defaultUI-toolbar .export-split button:not(:disabled):hover {
+  border-color: #36383f;
+  background-color: #36383f;
+}
+
+.toastui-editor-dark
+  .toastui-editor-defaultUI-toolbar
+  .export-split
+  > .export-split-main:only-child:not(:disabled):hover {
+  border-right-color: #36383f;
+}
+
+.toastui-editor-dark .toastui-editor-defaultUI-toolbar .export-split-caret:not(:disabled):hover {
+  border-left-color: #36383f;
 }
 
 .export-split-icon.theme-split-icon {
