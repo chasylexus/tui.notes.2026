@@ -34,6 +34,7 @@ const MIN_EDITOR_WIDTH = 520;
 const PANEL_RESIZER_WIDTH = 6;
 const DESKTOP_BREAKPOINT = 860;
 const NOTE_TITLE_SUFFIX_LENGTH = 6;
+const REMOTE_SYNC_INTERVAL_MS = 1500;
 
 const ICONS = {
   folder:
@@ -431,6 +432,9 @@ let persistInFlight = false;
 let persistQueued = false;
 let stateReady = false;
 let titleInputNoteId = null;
+let serverRevision = 0;
+let remoteSyncInFlight = false;
+let remoteSyncTimer = null;
 
 ensureValidStateShape();
 initializeExpandedFolders();
@@ -723,8 +727,8 @@ function createDefaultState() {
 
   return {
     folders: [
-      { id: workId, name: "Work", parentId: null, createdAt: now },
-      { id: personalId, name: "Personal", parentId: null, createdAt: now + 1 },
+      { id: workId, name: "Work", parentId: null, createdAt: now, updatedAt: now },
+      { id: personalId, name: "Personal", parentId: null, createdAt: now + 1, updatedAt: now + 1 },
     ],
     notes: [
       {
@@ -745,6 +749,7 @@ function createDefaultState() {
 
 async function apiRequest(url, options = {}) {
   const response = await fetch(url, {
+    cache: "no-store",
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -753,10 +758,31 @@ async function apiRequest(url, options = {}) {
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_error) {
+      payload = null;
+    }
+    const error = new Error(payload?.message || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
 
   return response.json();
+}
+
+function getPayloadRevision(payload) {
+  const parsed = Number(payload?._meta?.revision);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    return 0;
+  }
+  return parsed;
+}
+
+function updateServerRevision(payload) {
+  serverRevision = Math.max(serverRevision, getPayloadRevision(payload));
 }
 
 function applyStatePayload(payload) {
@@ -776,6 +802,7 @@ function snapshotStateForPersistence() {
       name: folder.name,
       parentId: folder.parentId ?? null,
       createdAt: folder.createdAt,
+      updatedAt: folder.updatedAt ?? folder.createdAt,
     })),
     notes: state.notes.map((note) => ({
       id: note.id,
@@ -793,10 +820,224 @@ function snapshotStateForPersistence() {
   };
 }
 
+function getFolderTimestamp(folder) {
+  return Number(folder?.updatedAt) || Number(folder?.createdAt) || 0;
+}
+
+function getNoteTimestamp(note) {
+  return Number(note?.updatedAt) || Number(note?.createdAt) || 0;
+}
+
+function cloneConflictEntity(entity) {
+  return entity && typeof entity === "object" ? { ...entity } : entity;
+}
+
+function mergeConflictPayload(localSnapshot, remotePayload) {
+  const remoteState = {
+    folders: Array.isArray(remotePayload?.folders) ? remotePayload.folders : [],
+    notes: Array.isArray(remotePayload?.notes) ? remotePayload.notes : [],
+    ui: remotePayload?.ui && typeof remotePayload.ui === "object" ? remotePayload.ui : {},
+  };
+
+  const folderById = new Map();
+  for (const folder of remoteState.folders) {
+    if (!folder?.id) {
+      continue;
+    }
+    folderById.set(String(folder.id), cloneConflictEntity(folder));
+  }
+  for (const folder of localSnapshot.folders || []) {
+    if (!folder?.id) {
+      continue;
+    }
+    const folderId = String(folder.id);
+    const remoteFolder = folderById.get(folderId);
+    if (!remoteFolder || getFolderTimestamp(folder) >= getFolderTimestamp(remoteFolder)) {
+      folderById.set(folderId, cloneConflictEntity(folder));
+    }
+  }
+
+  const mergedFolders = Array.from(folderById.values()).sort((left, right) => {
+    const byCreatedAt = (left.createdAt || 0) - (right.createdAt || 0);
+    if (byCreatedAt !== 0) {
+      return byCreatedAt;
+    }
+    return String(left.id).localeCompare(String(right.id), undefined, { sensitivity: "base" });
+  });
+  const validFolderIds = new Set(mergedFolders.map((folder) => String(folder.id)));
+
+  const noteById = new Map();
+  for (const note of remoteState.notes) {
+    if (!note?.id) {
+      continue;
+    }
+    noteById.set(String(note.id), cloneConflictEntity(note));
+  }
+  for (const note of localSnapshot.notes || []) {
+    if (!note?.id) {
+      continue;
+    }
+    const noteId = String(note.id);
+    const remoteNote = noteById.get(noteId);
+    if (!remoteNote || getNoteTimestamp(note) >= getNoteTimestamp(remoteNote)) {
+      noteById.set(noteId, cloneConflictEntity(note));
+    }
+  }
+
+  const mergedNotes = Array.from(noteById.values())
+    .map((note) => {
+      const folderId = note.folderId == null ? null : String(note.folderId);
+      return {
+        ...note,
+        folderId: folderId && validFolderIds.has(folderId) ? folderId : null,
+      };
+    })
+    .sort((left, right) => {
+      const byCreatedAt = (left.createdAt || 0) - (right.createdAt || 0);
+      if (byCreatedAt !== 0) {
+        return byCreatedAt;
+      }
+      return String(left.id).localeCompare(String(right.id), undefined, { sensitivity: "base" });
+    });
+
+  const remoteExpanded = Array.isArray(remoteState.ui?.expandedFolderIds)
+    ? remoteState.ui.expandedFolderIds
+    : [];
+  const localExpanded = Array.isArray(localSnapshot.ui?.expandedFolderIds)
+    ? localSnapshot.ui.expandedFolderIds
+    : [];
+  const mergedExpanded = [...new Set([...remoteExpanded, ...localExpanded])]
+    .map((folderId) => String(folderId))
+    .filter((folderId) => validFolderIds.has(folderId));
+
+  return {
+    folders: mergedFolders,
+    notes: mergedNotes,
+    ui: {
+      expandedFolderIds: mergedExpanded,
+    },
+  };
+}
+
+function hasPendingLocalChanges() {
+  return Boolean(saveTimer || persistInFlight || persistQueued);
+}
+
+function isEditorFocused() {
+  const activeElement = document.activeElement;
+  if (!(activeElement instanceof Element)) {
+    return false;
+  }
+  return Boolean(activeElement.closest(".toastui-editor-defaultUI"));
+}
+
+function commitActiveNoteContentFromEditor() {
+  if (!stateReady || ignoreEditorChange) {
+    return;
+  }
+
+  const note = getActiveNote();
+  if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
+    return;
+  }
+
+  let markdown = "";
+  try {
+    markdown = editor.getMarkdown();
+  } catch (error) {
+    console.error("[tui.notes.2026] failed to read markdown from editor", error);
+    return;
+  }
+
+  if (typeof markdown !== "string") {
+    return;
+  }
+
+  if (markdown !== note.content) {
+    note.content = markdown;
+    note.updatedAt = Date.now();
+    scheduleSaveIndicator("Saving...");
+    renderNotes();
+  }
+}
+
+function shouldDeferRemoteApply() {
+  if (!stateReady) {
+    return true;
+  }
+  if (hasPendingLocalChanges()) {
+    return true;
+  }
+  if (document.activeElement === elements.noteTitleInput) {
+    return true;
+  }
+
+  if (isEditorFocused()) {
+    commitActiveNoteContentFromEditor();
+    if (hasPendingLocalChanges()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function syncActiveEditorFromState() {
+  const note = getActiveNote();
+  if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
+    return;
+  }
+
+  ignoreEditorChange = true;
+  try {
+    editor.setMarkdown(note.content || "", false, false, true);
+  } catch (error) {
+    console.error("[tui.notes.2026] failed to sync editor content", error);
+  } finally {
+    ignoreEditorChange = false;
+  }
+}
+
+function applyRemoteState(payload, { refreshEditor = true } = {}) {
+  const previousActiveNoteId = activeNoteId;
+  const previousActiveContent = getActiveNote()?.content || "";
+  const preferredFolderId = selectedFolderId;
+
+  applyStatePayload(payload);
+  updateServerRevision(payload);
+
+  if (
+    preferredFolderId === ROOT_FOLDER_ID ||
+    preferredFolderId === TRASH_FOLDER_ID ||
+    folderExists(preferredFolderId)
+  ) {
+    selectedFolderId = preferredFolderId;
+  } else {
+    selectedFolderId = ROOT_FOLDER_ID;
+  }
+
+  renderAll();
+  ensureActiveNote();
+
+  const activeNote = getActiveNote();
+  const hasSameActiveNote =
+    Boolean(previousActiveNoteId) && activeNote?.id === previousActiveNoteId;
+  const activeContentChanged =
+    hasSameActiveNote && (activeNote.content || "") !== previousActiveContent;
+
+  if (refreshEditor && activeContentChanged) {
+    syncActiveEditorFromState();
+  }
+}
+
 async function persistStateToServer(snapshot) {
-  await apiRequest(STATE_API_ENDPOINT, {
+  return apiRequest(STATE_API_ENDPOINT, {
     method: "PUT",
-    body: JSON.stringify(snapshot),
+    body: JSON.stringify({
+      ...snapshot,
+      _meta: {
+        baseRevision: serverRevision,
+      },
+    }),
   });
 }
 
@@ -810,7 +1051,27 @@ async function flushPersistQueue() {
     do {
       persistQueued = false;
       const snapshot = snapshotStateForPersistence();
-      await persistStateToServer(snapshot);
+      try {
+        const response = await persistStateToServer(snapshot);
+        updateServerRevision(response);
+      } catch (error) {
+        const isConflict =
+          Number(error?.status) === 409 &&
+          error?.payload &&
+          typeof error.payload === "object" &&
+          error.payload.state;
+
+        if (!isConflict) {
+          throw error;
+        }
+
+        const mergedState = mergeConflictPayload(snapshot, error.payload.state);
+        applyRemoteState({
+          ...mergedState,
+          _meta: error.payload.state?._meta,
+        });
+        persistQueued = true;
+      }
     } while (persistQueued);
 
     elements.saveIndicator.textContent = "Saved";
@@ -826,7 +1087,7 @@ async function bootstrapState() {
   elements.saveIndicator.textContent = "Syncing...";
   try {
     const remoteState = await apiRequest(STATE_API_ENDPOINT);
-    applyStatePayload(remoteState);
+    applyRemoteState(remoteState, { refreshEditor: false });
   } catch (error) {
     console.error("[tui.notes.2026] bootstrap failed, seeding default state", error);
     applyStatePayload(createDefaultState());
@@ -837,6 +1098,49 @@ async function bootstrapState() {
   renderAll();
   ensureActiveNote();
   elements.saveIndicator.textContent = "Saved";
+  startRemoteSyncLoop();
+}
+
+function startRemoteSyncLoop() {
+  if (remoteSyncTimer) {
+    clearInterval(remoteSyncTimer);
+  }
+  remoteSyncTimer = window.setInterval(() => {
+    void syncStateFromServer();
+  }, REMOTE_SYNC_INTERVAL_MS);
+}
+
+async function syncStateFromServer({ force = false } = {}) {
+  if (!stateReady) {
+    return;
+  }
+  if (remoteSyncInFlight) {
+    return;
+  }
+  if (!force && document.hidden) {
+    return;
+  }
+  if (shouldDeferRemoteApply()) {
+    return;
+  }
+
+  remoteSyncInFlight = true;
+  try {
+    const remoteState = await apiRequest(STATE_API_ENDPOINT);
+    const remoteRevision = getPayloadRevision(remoteState);
+    if (!force && remoteRevision <= serverRevision) {
+      updateServerRevision(remoteState);
+      return;
+    }
+    if (shouldDeferRemoteApply()) {
+      return;
+    }
+    applyRemoteState(remoteState);
+  } catch (error) {
+    console.error("[tui.notes.2026] remote sync failed", error);
+  } finally {
+    remoteSyncInFlight = false;
+  }
 }
 
 function flushStateWithBeacon() {
@@ -844,8 +1148,15 @@ function flushStateWithBeacon() {
     return;
   }
 
+  commitActiveNoteContentFromEditor();
+
   try {
-    const payload = JSON.stringify(snapshotStateForPersistence());
+    const payload = JSON.stringify({
+      ...snapshotStateForPersistence(),
+      _meta: {
+        baseRevision: serverRevision,
+      },
+    });
     if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
       navigator.sendBeacon(
         STATE_API_ENDPOINT,
@@ -877,6 +1188,7 @@ function ensureValidStateShape() {
       name,
       parentId: rawFolder.parentId == null ? null : String(rawFolder.parentId),
       createdAt: Number(rawFolder.createdAt) || Date.now(),
+      updatedAt: Number(rawFolder.updatedAt) || Number(rawFolder.createdAt) || Date.now(),
     });
     folderIds.add(id);
   }
@@ -1373,6 +1685,7 @@ function ensureActiveNote() {
 
 function setActiveNote(noteId) {
   commitActiveNoteTitleFromInput();
+  commitActiveNoteContentFromEditor();
 
   const note = state.notes.find((item) => item.id === noteId && !isNoteInTrash(item));
   if (!note) {
@@ -1410,6 +1723,7 @@ function selectFolder(folderId) {
     return;
   }
   commitActiveNoteTitleFromInput();
+  commitActiveNoteContentFromEditor();
   hideContextMenu();
 
   if (folderId === TRASH_FOLDER_ID || folderId === ROOT_FOLDER_ID || folderExists(folderId)) {
@@ -1458,7 +1772,7 @@ function createFolder() {
 
   const now = Date.now();
   const folderId = createId();
-  state.folders.push({ id: folderId, name, parentId, createdAt: now });
+  state.folders.push({ id: folderId, name, parentId, createdAt: now, updatedAt: now });
 
   if (parentId) {
     expandedFolders.add(parentId);
@@ -1496,6 +1810,7 @@ function renameFolder(folderId) {
   }
 
   folder.name = name;
+  folder.updatedAt = Date.now();
   saveState();
   renderFolders();
   renderNotes();
@@ -1646,6 +1961,7 @@ function createNote() {
     return;
   }
   commitActiveNoteTitleFromInput();
+  commitActiveNoteContentFromEditor();
 
   const folderId = getSelectedParentFolderId();
   const title = nextDefaultNoteTitle(folderId);
@@ -1807,6 +2123,7 @@ function moveFolder(folderId, targetParentId) {
   }
 
   folder.parentId = normalizedParentId;
+  folder.updatedAt = Date.now();
   if (normalizedParentId) {
     expandedFolders.add(normalizedParentId);
   }
@@ -2245,6 +2562,16 @@ function wireEvents() {
     applyLayoutPrefs(false);
   });
 
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      void syncStateFromServer({ force: true });
+    }
+  });
+
+  window.addEventListener("focus", () => {
+    void syncStateFromServer({ force: true });
+  });
+
   elements.folderList.addEventListener("dragstart", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) {
@@ -2325,6 +2652,11 @@ function wireEvents() {
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
+    }
+
+    if (remoteSyncTimer) {
+      clearInterval(remoteSyncTimer);
+      remoteSyncTimer = null;
     }
 
     stopResize();

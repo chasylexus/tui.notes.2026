@@ -104,6 +104,7 @@ const DATA_DIR = STORAGE_PATHS.appRootDir;
 const NOTES_DIR = STORAGE_PATHS.notesDir;
 const TRASH_DIR = STORAGE_PATHS.trashDir;
 const STATE_FILE = STORAGE_PATHS.stateFile;
+const INITIAL_STATE_REVISION = 1;
 
 const starterContent = `# Welcome to TUI Notes 2026
 
@@ -133,6 +134,14 @@ function ensureDataLayout() {
 
 function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+}
+
+function serializeStateSnapshot(state) {
+  return JSON.stringify({
+    folders: Array.isArray(state?.folders) ? state.folders : [],
+    notes: Array.isArray(state?.notes) ? state.notes : [],
+    ui: state?.ui && typeof state.ui === "object" ? state.ui : {},
+  });
 }
 
 function ensureParentDir(filePath) {
@@ -340,8 +349,8 @@ function createDefaultStatePayload() {
 
   const state = {
     folders: [
-      { id: workId, name: "Work", parentId: null, createdAt: now },
-      { id: personalId, name: "Personal", parentId: null, createdAt: now + 1 },
+      { id: workId, name: "Work", parentId: null, createdAt: now, updatedAt: now },
+      { id: personalId, name: "Personal", parentId: null, createdAt: now + 1, updatedAt: now + 1 },
     ],
     notes: [
       {
@@ -439,11 +448,13 @@ function ensureFolderPath(state, folderSegments) {
 
     let folder = findFolderByParentAndName(state, parentId, folderName);
     if (!folder) {
+      const now = Date.now();
       folder = {
         id: createId(),
         name: folderName,
         parentId,
-        createdAt: Date.now(),
+        createdAt: now,
+        updatedAt: now,
       };
       state.folders.push(folder);
     }
@@ -556,6 +567,7 @@ function normalizeStatePayload(rawPayload) {
       name,
       parentId: rawFolder.parentId == null ? null : toStringId(rawFolder.parentId),
       createdAt: Number(rawFolder.createdAt) || Date.now(),
+      updatedAt: Number(rawFolder.updatedAt) || Number(rawFolder.createdAt) || Date.now(),
     });
     folderIds.add(id);
   }
@@ -652,6 +664,42 @@ function normalizeStatePayload(rawPayload) {
   return { state, noteContents };
 }
 
+function normalizeStateMeta(rawMeta, fallbackRevision = INITIAL_STATE_REVISION) {
+  const now = Date.now();
+  const parsedRevision = Number(rawMeta?.revision);
+  const revision =
+    Number.isSafeInteger(parsedRevision) && parsedRevision >= 0
+      ? parsedRevision
+      : fallbackRevision;
+
+  const parsedUpdatedAt = Number(rawMeta?.updatedAt);
+  const updatedAt = Number.isFinite(parsedUpdatedAt) && parsedUpdatedAt > 0 ? parsedUpdatedAt : now;
+
+  return { revision, updatedAt };
+}
+
+function parseBaseRevision(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== "object") {
+    return null;
+  }
+  const parsed = Number(rawPayload?._meta?.baseRevision);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function createConflictError(expectedRevision, actualRevision, statePayload) {
+  const error = new Error("State revision mismatch.");
+  error.status = 409;
+  error.payload = {
+    expectedRevision,
+    actualRevision,
+    state: statePayload,
+  };
+  return error;
+}
+
 function getNoteRelativePath(note) {
   const relativePath = sanitizeMdRelativePath(note.fileName, note.id);
   note.fileName = relativePath;
@@ -680,6 +728,17 @@ function readNoteContentFromDisk(note) {
     ensureParentDir(filePath);
     fs.writeFileSync(filePath, fallback, "utf8");
     return fallback;
+  }
+}
+
+function readFileContentIfExists(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return null;
+  }
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch (_error) {
+    return null;
   }
 }
 
@@ -743,11 +802,15 @@ function ensureMissingFilesFromPayload(state, noteContents) {
   }
 }
 
-function writeStateMetadata(state) {
+function writeStateMetadata(state, meta) {
   writeJson(STATE_FILE, {
     folders: state.folders,
     notes: state.notes,
     ui: state.ui,
+    _meta: {
+      revision: Number(meta?.revision) || INITIAL_STATE_REVISION,
+      updatedAt: Number(meta?.updatedAt) || Date.now(),
+    },
   });
 }
 
@@ -756,14 +819,19 @@ function loadStateFromDisk() {
 
   const rawPayload = safeReadJson(STATE_FILE);
   let payload;
+  let meta;
+  let previousSerializedState = null;
 
   if (rawPayload) {
     payload = normalizeStatePayload(rawPayload);
+    previousSerializedState = serializeStateSnapshot(payload.state);
+    meta = normalizeStateMeta(rawPayload?._meta, INITIAL_STATE_REVISION);
   } else {
     payload = createImportedStatePayload();
     if (!payload.state.notes.length) {
       payload = createDefaultStatePayload();
     }
+    meta = normalizeStateMeta(null, INITIAL_STATE_REVISION);
   }
 
   const { state, noteContents } = payload;
@@ -776,9 +844,20 @@ function loadStateFromDisk() {
   }
 
   ensureMissingFilesFromPayload(state, noteContents);
-  writeStateMetadata(state);
+  const nextSerializedState = serializeStateSnapshot(state);
+  const stateMutated =
+    previousSerializedState == null || previousSerializedState !== nextSerializedState;
 
-  return state;
+  if (stateMutated) {
+    meta = {
+      revision: rawPayload ? meta.revision + 1 : meta.revision,
+      updatedAt: Date.now(),
+    };
+  }
+
+  writeStateMetadata(state, meta);
+
+  return { state, meta };
 }
 
 function moveFileSafely(sourcePath, targetPath) {
@@ -798,8 +877,20 @@ function moveFileSafely(sourcePath, targetPath) {
 }
 
 function saveIncomingState(rawPayload) {
-  const previousState = loadStateFromDisk();
+  const previousEnvelope = loadStateFromDisk();
+  const previousState = previousEnvelope.state;
+  const previousMeta = previousEnvelope.meta;
   const previousNotesById = new Map(previousState.notes.map((note) => [note.id, note]));
+  const previousSerializedState = serializeStateSnapshot(previousState);
+
+  const baseRevision = parseBaseRevision(rawPayload);
+  if (baseRevision != null && baseRevision !== previousMeta.revision) {
+    throw createConflictError(
+      baseRevision,
+      previousMeta.revision,
+      hydrateState(previousState, previousMeta),
+    );
+  }
 
   const { state, noteContents } = normalizeStatePayload(rawPayload);
 
@@ -814,6 +905,19 @@ function saveIncomingState(rawPayload) {
     const previousNote = previousNotesById.get(note.id);
     const previousPath = previousNote ? getNoteFilePath(previousNote) : null;
     const targetPath = getNoteFilePath(note);
+    const previousUpdatedAt = previousNote ? Number(previousNote.updatedAt) || 0 : 0;
+    const nextUpdatedAt = Number(note.updatedAt) || 0;
+    const targetExistsBeforeWrite = fs.existsSync(targetPath);
+    const pathChanged = Boolean(previousPath && previousPath !== targetPath);
+
+    if (
+      previousNote &&
+      !pathChanged &&
+      previousUpdatedAt === nextUpdatedAt &&
+      targetExistsBeforeWrite
+    ) {
+      continue;
+    }
 
     const content = noteContents.has(note.id)
       ? noteContents.get(note.id)
@@ -823,20 +927,34 @@ function saveIncomingState(rawPayload) {
           ? fs.readFileSync(targetPath, "utf8")
           : defaultNoteContent(note.title);
 
-    if (previousPath && previousPath !== targetPath) {
+    if (pathChanged) {
       moveFileSafely(previousPath, targetPath);
     }
 
-    ensureParentDir(targetPath);
-    fs.writeFileSync(targetPath, content, "utf8");
+    const existingTargetContent = readFileContentIfExists(targetPath);
+    const shouldWriteFile = existingTargetContent == null || existingTargetContent !== content;
+
+    if (shouldWriteFile) {
+      ensureParentDir(targetPath);
+      fs.writeFileSync(targetPath, content, "utf8");
+    }
   }
 
-  writeStateMetadata(state);
+  const nextSerializedState = serializeStateSnapshot(state);
+  const stateMutated = previousSerializedState !== nextSerializedState;
+  const nextMeta = stateMutated
+    ? {
+      revision: previousMeta.revision + 1,
+      updatedAt: Date.now(),
+    }
+    : previousMeta;
 
-  return state;
+  writeStateMetadata(state, nextMeta);
+
+  return { state, meta: nextMeta };
 }
 
-function hydrateState(state) {
+function hydrateState(state, meta) {
   return {
     folders: state.folders.map((folder) => ({ ...folder })),
     notes: state.notes.map((note) => ({
@@ -848,17 +966,21 @@ function hydrateState(state) {
         ? [...state.ui.expandedFolderIds]
         : [],
     },
+    _meta: {
+      revision: Number(meta?.revision) || INITIAL_STATE_REVISION,
+      updatedAt: Number(meta?.updatedAt) || Date.now(),
+    },
   };
 }
 
 export function getHydratedState() {
-  const state = loadStateFromDisk();
-  return hydrateState(state);
+  const envelope = loadStateFromDisk();
+  return hydrateState(envelope.state, envelope.meta);
 }
 
 export function replaceState(rawPayload) {
-  const state = saveIncomingState(rawPayload);
-  return hydrateState(state);
+  const envelope = saveIncomingState(rawPayload);
+  return hydrateState(envelope.state, envelope.meta);
 }
 
 export function getStorageRootDir() {

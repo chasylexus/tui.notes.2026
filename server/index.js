@@ -37,6 +37,10 @@ if (shouldServeDist && fs.existsSync(DIST_DIR)) {
 }
 
 app.use(express.json({ limit: "25mb" }));
+app.use("/api", (_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -58,8 +62,19 @@ function handleStateWrite(req, res) {
     return;
   }
 
-  const nextState = replaceState(req.body);
-  res.json(nextState);
+  try {
+    const nextState = replaceState(req.body);
+    res.json(nextState);
+  } catch (error) {
+    if (Number(error?.status) === 409) {
+      res.status(409).json({
+        message: error.message || "State conflict detected.",
+        ...(error?.payload && typeof error.payload === "object" ? error.payload : {}),
+      });
+      return;
+    }
+    throw error;
+  }
 }
 
 app.put("/api/state", handleStateWrite);
