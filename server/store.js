@@ -4,10 +4,12 @@ import path from "node:path";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
+const APP_HOME_DIR = path.join(process.env.HOME || process.cwd(), ".tui.notes.2026");
 const ROOT_CONFIG_FILE = path.join(process.cwd(), "tui-notes.config.json");
+const GLOBAL_CONFIG_FILE = path.join(APP_HOME_DIR, "config.json");
 const ROOT_DIR_ENV_NAME = "TUI_NOTES_ROOT_DIR";
 const NOTES_DIR_ENV_NAME = "TUI_NOTES_NOTES_DIR";
-const DEFAULT_NOTES_DIR = path.join(process.env.HOME || process.cwd(), ".tui.notes.2026", "notes");
+const DEFAULT_NOTES_DIR = path.join(APP_HOME_DIR, "notes");
 
 function expandHomePrefix(inputPath) {
   if (typeof inputPath !== "string") {
@@ -77,7 +79,12 @@ function resolveStoragePaths() {
     return createStoragePathsFromRootDir(envRootDir);
   }
 
-  const config = safeReadJson(ROOT_CONFIG_FILE);
+  const localConfig = safeReadJson(ROOT_CONFIG_FILE);
+  const globalConfig = safeReadJson(GLOBAL_CONFIG_FILE);
+  const config = {
+    ...(globalConfig && typeof globalConfig === "object" ? globalConfig : {}),
+    ...(localConfig && typeof localConfig === "object" ? localConfig : {}),
+  };
 
   const configNotesDir = expandHomePrefix(config?.notesDir);
   if (configNotesDir) {

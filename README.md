@@ -1,0 +1,54 @@
+# @techie_doubts/tui.notes.2026
+
+Local-first notes app with Apple Notes-style UI.
+
+## Quick start
+
+```bash
+npm i -g @techie_doubts/tui.notes.2026
+tui-notes-2026
+```
+
+Open `http://127.0.0.1:8787`
+
+Without global install:
+
+```bash
+npx @techie_doubts/tui.notes.2026
+```
+
+## Storage
+
+- Notes: `~/.tui.notes.2026/notes`
+- Trash: `~/.tui.notes.2026/trash`
+- State: `~/.tui.notes.2026/state.json`
+
+On startup, existing `.md` files in the notes directory are imported.
+
+## Config
+
+Use `~/.tui.notes.2026/config.json` (global) or `./tui-notes.config.json` (local override):
+
+```json
+{
+  "notesDir": "~/Documents/MyNotes"
+}
+```
+
+Precedence: CLI/env > local config > global config > default path.
+
+## CLI
+
+```text
+tui-notes-2026 [options]
+--host <host>
+--port <port>
+--notes-dir <path>
+--root-dir <path>
+--no-build
+--help
+```
+
+## License
+
+0BSD

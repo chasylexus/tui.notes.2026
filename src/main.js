@@ -8,6 +8,7 @@ import mermaidPlugin from "@techie_doubts/editor-plugin-mermaid";
 import tableMergedCell from "@techie_doubts/editor-plugin-table-merged-cell";
 import uml from "@techie_doubts/editor-plugin-uml";
 import Prism from "prismjs";
+import "./prism-languages.generated.js";
 
 import "@techie_doubts/tui.editor.2026/dist/td-editor.css";
 import "@techie_doubts/tui.editor.2026/dist/theme/td-editor-dark.css";
@@ -429,6 +430,7 @@ let resizeState = null;
 let persistInFlight = false;
 let persistQueued = false;
 let stateReady = false;
+let titleInputNoteId = null;
 
 ensureValidStateShape();
 initializeExpandedFolders();
@@ -1330,11 +1332,13 @@ function renderEditorHeader() {
   if (!hasActiveEditableNote) {
     elements.noteTitleInput.value = "";
     elements.noteTitleInput.disabled = true;
+    titleInputNoteId = null;
     return;
   }
 
   elements.noteTitleInput.disabled = false;
   elements.noteTitleInput.value = note.title;
+  titleInputNoteId = note.id;
 }
 
 function clearEditorSelection() {
@@ -1604,6 +1608,9 @@ function commitActiveNoteTitleFromInput() {
   if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
     return;
   }
+  if (titleInputNoteId !== note.id) {
+    return;
+  }
 
   const requestedTitle = normalizeNoteTitle(elements.noteTitleInput.value);
   const uniqueTitle = resolveUniqueNoteTitleWithPrompt(requestedTitle, note.folderId, note.id);
@@ -1618,6 +1625,7 @@ function commitActiveNoteTitleFromInput() {
   if (elements.noteTitleInput.value !== uniqueTitle) {
     elements.noteTitleInput.value = uniqueTitle;
   }
+  titleInputNoteId = note.id;
 }
 
 function createNote() {
