@@ -6,6 +6,8 @@ const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 const ROOT_CONFIG_FILE = path.join(process.cwd(), "tui-notes.config.json");
 const ROOT_DIR_ENV_NAME = "TUI_NOTES_ROOT_DIR";
+const NOTES_DIR_ENV_NAME = "TUI_NOTES_NOTES_DIR";
+const DEFAULT_NOTES_DIR = path.join(process.env.HOME || process.cwd(), ".tui.notes.2026", "notes");
 
 function expandHomePrefix(inputPath) {
   if (typeof inputPath !== "string") {
@@ -28,25 +30,73 @@ function expandHomePrefix(inputPath) {
   return value;
 }
 
-function resolveStorageRootDir() {
-  const envPath = expandHomePrefix(process.env[ROOT_DIR_ENV_NAME]);
-  if (envPath) {
-    return path.resolve(envPath);
+function safeReadJson(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    const raw = fs.readFileSync(filePath, "utf8");
+    if (!raw.trim()) {
+      return null;
+    }
+    return JSON.parse(raw);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function createStoragePathsFromRootDir(rootDir) {
+  const appRootDir = path.resolve(rootDir);
+  return {
+    appRootDir,
+    notesDir: path.join(appRootDir, "notes"),
+    trashDir: path.join(appRootDir, "trash"),
+    stateFile: path.join(appRootDir, "state.json"),
+  };
+}
+
+function createStoragePathsFromNotesDir(notesDir) {
+  const resolvedNotesDir = path.resolve(notesDir);
+  const appRootDir = path.dirname(resolvedNotesDir);
+  return {
+    appRootDir,
+    notesDir: resolvedNotesDir,
+    trashDir: path.join(appRootDir, "trash"),
+    stateFile: path.join(appRootDir, "state.json"),
+  };
+}
+
+function resolveStoragePaths() {
+  const envNotesDir = expandHomePrefix(process.env[NOTES_DIR_ENV_NAME]);
+  if (envNotesDir) {
+    return createStoragePathsFromNotesDir(envNotesDir);
+  }
+
+  const envRootDir = expandHomePrefix(process.env[ROOT_DIR_ENV_NAME]);
+  if (envRootDir) {
+    return createStoragePathsFromRootDir(envRootDir);
   }
 
   const config = safeReadJson(ROOT_CONFIG_FILE);
-  const configPath = expandHomePrefix(config?.notesRootDir);
-  if (configPath) {
-    return path.resolve(configPath);
+
+  const configNotesDir = expandHomePrefix(config?.notesDir);
+  if (configNotesDir) {
+    return createStoragePathsFromNotesDir(configNotesDir);
   }
 
-  return path.join(process.cwd(), "data");
+  const configRootDir = expandHomePrefix(config?.notesRootDir);
+  if (configRootDir) {
+    return createStoragePathsFromRootDir(configRootDir);
+  }
+
+  return createStoragePathsFromNotesDir(DEFAULT_NOTES_DIR);
 }
 
-const DATA_DIR = resolveStorageRootDir();
-const NOTES_DIR = path.join(DATA_DIR, "notes");
-const TRASH_DIR = path.join(DATA_DIR, "trash");
-const STATE_FILE = path.join(DATA_DIR, "state.json");
+const STORAGE_PATHS = resolveStoragePaths();
+const DATA_DIR = STORAGE_PATHS.appRootDir;
+const NOTES_DIR = STORAGE_PATHS.notesDir;
+const TRASH_DIR = STORAGE_PATHS.trashDir;
+const STATE_FILE = STORAGE_PATHS.stateFile;
 
 const starterContent = `# Welcome to TUI Notes 2026
 
@@ -74,23 +124,12 @@ function ensureDataLayout() {
   fs.mkdirSync(TRASH_DIR, { recursive: true });
 }
 
-function safeReadJson(filePath) {
-  try {
-    if (!fs.existsSync(filePath)) {
-      return null;
-    }
-    const raw = fs.readFileSync(filePath, "utf8");
-    if (!raw.trim()) {
-      return null;
-    }
-    return JSON.parse(raw);
-  } catch (_error) {
-    return null;
-  }
-}
-
 function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+}
+
+function ensureParentDir(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
 function toStringId(value) {
@@ -101,26 +140,189 @@ function toStringId(value) {
   return id || null;
 }
 
-function sanitizeMdFileName(fileName, noteId) {
-  const fallback = `${noteId}.md`;
+function sanitizePathSegment(segment) {
+  const trimmed = String(segment || "").trim();
+  if (!trimmed || trimmed === "." || trimmed === "..") {
+    return "";
+  }
+
+  const cleaned = trimmed.replace(/[<>:"|?*\u0000-\u001f]/g, "");
+  return cleaned || "";
+}
+
+function sanitizeMdRelativePath(fileName, noteId) {
+  const fallback = `${noteId || "note"}.md`;
   if (typeof fileName !== "string") {
     return fallback;
   }
 
-  const trimmed = fileName.trim();
-  if (!trimmed) {
+  const rawValue = fileName.trim().replaceAll("\\", "/");
+  if (!rawValue) {
     return fallback;
   }
 
-  const noSlashes = trimmed.replace(/[\\/]/g, "-");
-  const safe = noSlashes.replace(/\s+/g, "-").replace(/[^a-zA-Z0-9._-]/g, "");
-  if (!safe || safe === "." || safe === "..") {
+  const normalized = path.posix
+    .normalize(rawValue)
+    .replace(/^\/+/, "")
+    .replace(/^(\.\/)+/, "");
+
+  if (
+    !normalized ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../")
+  ) {
     return fallback;
   }
-  if (safe.toLowerCase().endsWith(".md")) {
-    return safe;
+
+  const parts = normalized.split("/").filter(Boolean);
+  const safeParts = parts.map(sanitizePathSegment).filter(Boolean);
+  if (!safeParts.length) {
+    return fallback;
   }
-  return `${safe}.md`;
+
+  const lastIndex = safeParts.length - 1;
+  if (!safeParts[lastIndex].toLowerCase().endsWith(".md")) {
+    safeParts[lastIndex] = `${safeParts[lastIndex]}.md`;
+  }
+
+  return safeParts.join("/");
+}
+
+function normalizeFileTitleBase(title) {
+  const raw = String(title || "")
+    .replaceAll("\\", " ")
+    .replaceAll("/", " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const withoutExt = raw.replace(/\.md$/i, "").trim();
+  const safe = sanitizePathSegment(withoutExt);
+  return safe || "Untitled";
+}
+
+function createRandomFileSuffix(length = 6) {
+  const bytesLength = Number.isFinite(length) && length > 0 ? Math.ceil(length / 2) : 3;
+  return crypto.randomBytes(bytesLength).toString("hex").slice(0, Math.max(length, 1));
+}
+
+function resolveFolderPathSegments(state) {
+  const folderById = new Map(state.folders.map((folder) => [folder.id, folder]));
+  const cache = new Map();
+
+  function resolve(folderId) {
+    if (!folderId || !folderById.has(folderId)) {
+      return [];
+    }
+    if (cache.has(folderId)) {
+      return cache.get(folderId);
+    }
+
+    const parts = [];
+    const visited = new Set();
+    let current = folderById.get(folderId);
+
+    while (current) {
+      if (visited.has(current.id)) {
+        break;
+      }
+      visited.add(current.id);
+
+      const segment = sanitizePathSegment(current.name);
+      if (segment) {
+        parts.push(segment);
+      }
+
+      if (!current.parentId || !folderById.has(current.parentId)) {
+        break;
+      }
+      current = folderById.get(current.parentId);
+    }
+
+    const resolved = parts.reverse();
+    cache.set(folderId, resolved);
+    return resolved;
+  }
+
+  return resolve;
+}
+
+function joinRelativePath(dirPath, fileName) {
+  if (!dirPath) {
+    return fileName;
+  }
+  return `${dirPath}/${fileName}`;
+}
+
+function assignNoteFileNamesFromTitles(state) {
+  const resolveFolderSegments = resolveFolderPathSegments(state);
+  const usedPaths = new Set();
+
+  const notesOrdered = [...state.notes].sort((left, right) => {
+    const byCreatedAt = (left.createdAt || 0) - (right.createdAt || 0);
+    if (byCreatedAt !== 0) {
+      return byCreatedAt;
+    }
+    return String(left.id).localeCompare(String(right.id), undefined, { sensitivity: "base" });
+  });
+
+  for (const note of notesOrdered) {
+    const folderSegments = resolveFolderSegments(note.folderId);
+    const folderPath = folderSegments.join("/");
+    const baseName = normalizeFileTitleBase(note.title);
+    const legacyRelativePath = sanitizeMdRelativePath(note.fileName, note.id);
+    const legacyDirPath = path.posix.dirname(legacyRelativePath) === "." ? "" : path.posix.dirname(legacyRelativePath);
+    const legacyBaseName = path.posix.basename(legacyRelativePath, ".md");
+    const storageKeyPrefix = note.deletedAt ? "trash" : "notes";
+
+    const defaultCandidate = joinRelativePath(folderPath, `${baseName}.md`);
+    const defaultCandidateKey = `${storageKeyPrefix}:${defaultCandidate.toLowerCase()}`;
+
+    if (!usedPaths.has(defaultCandidateKey)) {
+      note.fileName = defaultCandidate;
+      usedPaths.add(defaultCandidateKey);
+      continue;
+    }
+
+    const canReuseLegacyPath =
+      legacyDirPath === folderPath &&
+      legacyBaseName.toLowerCase().startsWith(baseName.toLowerCase());
+    const legacyCandidateKey = `${storageKeyPrefix}:${legacyRelativePath.toLowerCase()}`;
+    if (canReuseLegacyPath && !usedPaths.has(legacyCandidateKey)) {
+      note.fileName = legacyRelativePath;
+      usedPaths.add(legacyCandidateKey);
+      continue;
+    }
+
+    let attempt = 0;
+    while (attempt < 1000) {
+      const candidate = joinRelativePath(folderPath, `${baseName}-${createRandomFileSuffix()}.md`);
+      const candidateKey = `${storageKeyPrefix}:${candidate.toLowerCase()}`;
+      if (!usedPaths.has(candidateKey)) {
+        note.fileName = candidate;
+        usedPaths.add(candidateKey);
+        break;
+      }
+      attempt += 1;
+    }
+
+    if (!note.fileName) {
+      note.fileName = joinRelativePath(folderPath, `${baseName}-${Date.now()}.md`);
+      usedPaths.add(`${storageKeyPrefix}:${note.fileName.toLowerCase()}`);
+    }
+  }
+}
+
+function toPosixRelativePath(baseDir, absolutePath) {
+  return path.relative(baseDir, absolutePath).split(path.sep).join("/");
+}
+
+function ensureStateUiObject(state) {
+  if (!state.ui || typeof state.ui !== "object") {
+    state.ui = {};
+  }
+  if (!Array.isArray(state.ui.expandedFolderIds)) {
+    state.ui.expandedFolderIds = [];
+  }
 }
 
 function createDefaultStatePayload() {
@@ -152,6 +354,176 @@ function createDefaultStatePayload() {
 
   const noteContents = new Map([[noteId, starterContent]]);
   return { state, noteContents };
+}
+
+function listMarkdownFilesRecursively(rootDir) {
+  if (!fs.existsSync(rootDir)) {
+    return [];
+  }
+
+  const files = [];
+  const stack = [rootDir];
+
+  while (stack.length) {
+    const currentDir = stack.pop();
+    let entries = [];
+
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch (_error) {
+      continue;
+    }
+
+    entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+
+    for (const entry of entries) {
+      const absolutePath = path.join(currentDir, entry.name);
+
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        stack.push(absolutePath);
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      if (!entry.name.toLowerCase().endsWith(".md")) {
+        continue;
+      }
+
+      files.push(absolutePath);
+    }
+  }
+
+  return files.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+function folderNameEquals(left, right) {
+  return String(left || "").toLowerCase() === String(right || "").toLowerCase();
+}
+
+function findFolderByParentAndName(state, parentId, name) {
+  const normalizedParentId = parentId || null;
+  for (const folder of state.folders) {
+    if ((folder.parentId || null) !== normalizedParentId) {
+      continue;
+    }
+    if (folderNameEquals(folder.name, name)) {
+      return folder;
+    }
+  }
+  return null;
+}
+
+function ensureFolderPath(state, folderSegments) {
+  let parentId = null;
+  const folderChainIds = [];
+
+  for (const segment of folderSegments) {
+    const folderName = String(segment || "").trim();
+    if (!folderName) {
+      continue;
+    }
+
+    let folder = findFolderByParentAndName(state, parentId, folderName);
+    if (!folder) {
+      folder = {
+        id: createId(),
+        name: folderName,
+        parentId,
+        createdAt: Date.now(),
+      };
+      state.folders.push(folder);
+    }
+
+    parentId = folder.id;
+    folderChainIds.push(folder.id);
+  }
+
+  return { folderId: parentId, folderChainIds };
+}
+
+function deriveTitleFromFileName(relativePath) {
+  const baseName = path.posix.basename(relativePath, ".md");
+  const readable = baseName.replace(/[-_]+/g, " ").trim();
+  return readable || "Untitled";
+}
+
+function importMarkdownNotesFromDisk(state) {
+  ensureStateUiObject(state);
+
+  const activePathSet = new Set();
+  for (const note of state.notes) {
+    if (note.deletedAt) {
+      continue;
+    }
+    const relativePath = sanitizeMdRelativePath(note.fileName, note.id).toLowerCase();
+    activePathSet.add(relativePath);
+  }
+
+  const expandedFolderIds = new Set(
+    state.ui.expandedFolderIds
+      .map((folderId) => toStringId(folderId))
+      .filter((folderId) => folderId),
+  );
+
+  const files = listMarkdownFilesRecursively(NOTES_DIR);
+  for (const absolutePath of files) {
+    const relativeRawPath = toPosixRelativePath(NOTES_DIR, absolutePath);
+    const tempId = createId();
+    const relativePath = sanitizeMdRelativePath(relativeRawPath, tempId);
+    const pathKey = relativePath.toLowerCase();
+
+    if (activePathSet.has(pathKey)) {
+      continue;
+    }
+
+    const rawSegments = relativeRawPath.replaceAll("\\", "/").split("/").filter(Boolean);
+    const folderSegments = rawSegments.slice(0, -1);
+    const { folderId, folderChainIds } = ensureFolderPath(state, folderSegments);
+
+    for (const folderChainId of folderChainIds) {
+      expandedFolderIds.add(folderChainId);
+    }
+
+    let modifiedAt = Date.now();
+    try {
+      const stat = fs.statSync(absolutePath);
+      modifiedAt = Number(stat.mtimeMs) || modifiedAt;
+    } catch (_error) {
+      // Keep default timestamp.
+    }
+
+    state.notes.push({
+      id: tempId,
+      title: deriveTitleFromFileName(relativePath),
+      folderId,
+      fileName: relativePath,
+      createdAt: modifiedAt,
+      updatedAt: modifiedAt,
+      deletedAt: null,
+    });
+    activePathSet.add(pathKey);
+  }
+
+  state.ui.expandedFolderIds = Array.from(expandedFolderIds);
+}
+
+function createImportedStatePayload() {
+  const state = {
+    folders: [],
+    notes: [],
+    ui: {
+      expandedFolderIds: [],
+    },
+  };
+  importMarkdownNotesFromDisk(state);
+  return { state, noteContents: new Map() };
 }
 
 function normalizeStatePayload(rawPayload) {
@@ -230,7 +602,13 @@ function normalizeStatePayload(rawPayload) {
     const createdAt = Number(rawNote.createdAt) || Date.now();
     const updatedAt = Number(rawNote.updatedAt) || createdAt;
     const deletedAt = rawNote.deletedAt ? Number(rawNote.deletedAt) || null : null;
-    const fileName = sanitizeMdFileName(rawNote.fileName, id);
+    const fileNameInput =
+      typeof rawNote.fileName === "string"
+        ? rawNote.fileName
+        : typeof rawNote.filePath === "string"
+          ? rawNote.filePath
+          : "";
+    const fileName = sanitizeMdRelativePath(fileNameInput, id);
 
     normalizedNotes.push({
       id,
@@ -267,17 +645,23 @@ function normalizeStatePayload(rawPayload) {
   return { state, noteContents };
 }
 
+function getNoteRelativePath(note) {
+  const relativePath = sanitizeMdRelativePath(note.fileName, note.id);
+  note.fileName = relativePath;
+  return relativePath;
+}
+
 function getNoteFilePath(note) {
-  const fileName = sanitizeMdFileName(note.fileName, note.id);
-  note.fileName = fileName;
+  const relativePath = getNoteRelativePath(note);
   const targetDir = note.deletedAt ? TRASH_DIR : NOTES_DIR;
-  return path.join(targetDir, fileName);
+  return path.join(targetDir, ...relativePath.split("/"));
 }
 
 function readNoteContentFromDisk(note) {
   const filePath = getNoteFilePath(note);
   if (!fs.existsSync(filePath)) {
     const fallback = defaultNoteContent(note.title);
+    ensureParentDir(filePath);
     fs.writeFileSync(filePath, fallback, "utf8");
     return fallback;
   }
@@ -286,6 +670,7 @@ function readNoteContentFromDisk(note) {
     return fs.readFileSync(filePath, "utf8");
   } catch (_error) {
     const fallback = defaultNoteContent(note.title);
+    ensureParentDir(filePath);
     fs.writeFileSync(filePath, fallback, "utf8");
     return fallback;
   }
@@ -302,11 +687,15 @@ function deleteNoteFileIfExists(filePath) {
 }
 
 function deleteNoteFiles(note) {
-  const fileName = sanitizeMdFileName(note.fileName, note.id);
-  deleteNoteFileIfExists(path.join(NOTES_DIR, fileName));
-  deleteNoteFileIfExists(path.join(TRASH_DIR, fileName));
-  deleteNoteFileIfExists(path.join(NOTES_DIR, `${note.id}.md`));
-  deleteNoteFileIfExists(path.join(TRASH_DIR, `${note.id}.md`));
+  const relativePath = sanitizeMdRelativePath(note.fileName, note.id);
+  const relativeParts = relativePath.split("/");
+
+  deleteNoteFileIfExists(path.join(NOTES_DIR, ...relativeParts));
+  deleteNoteFileIfExists(path.join(TRASH_DIR, ...relativeParts));
+
+  const legacyName = `${note.id}.md`;
+  deleteNoteFileIfExists(path.join(NOTES_DIR, legacyName));
+  deleteNoteFileIfExists(path.join(TRASH_DIR, legacyName));
 }
 
 function purgeExpiredNotes(state) {
@@ -342,27 +731,8 @@ function ensureMissingFilesFromPayload(state, noteContents) {
     const content = noteContents.has(note.id)
       ? noteContents.get(note.id)
       : defaultNoteContent(note.title);
+    ensureParentDir(filePath);
     fs.writeFileSync(filePath, content, "utf8");
-  }
-}
-
-function cleanupOrphanMarkdownFiles(state) {
-  const expectedPaths = new Set(state.notes.map((note) => getNoteFilePath(note)));
-
-  for (const dir of [NOTES_DIR, TRASH_DIR]) {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isFile()) {
-        continue;
-      }
-      if (!entry.name.toLowerCase().endsWith(".md")) {
-        continue;
-      }
-
-      const filePath = path.join(dir, entry.name);
-      if (!expectedPaths.has(filePath)) {
-        deleteNoteFileIfExists(filePath);
-      }
-    }
   }
 }
 
@@ -378,9 +748,20 @@ function loadStateFromDisk() {
   ensureDataLayout();
 
   const rawPayload = safeReadJson(STATE_FILE);
-  const { state, noteContents } = rawPayload
-    ? normalizeStatePayload(rawPayload)
-    : createDefaultStatePayload();
+  let payload;
+
+  if (rawPayload) {
+    payload = normalizeStatePayload(rawPayload);
+  } else {
+    payload = createImportedStatePayload();
+    if (!payload.state.notes.length) {
+      payload = createDefaultStatePayload();
+    }
+  }
+
+  const { state, noteContents } = payload;
+
+  importMarkdownNotesFromDisk(state);
 
   const removedNotes = purgeExpiredNotes(state);
   for (const note of removedNotes) {
@@ -388,10 +769,25 @@ function loadStateFromDisk() {
   }
 
   ensureMissingFilesFromPayload(state, noteContents);
-  cleanupOrphanMarkdownFiles(state);
   writeStateMetadata(state);
 
   return state;
+}
+
+function moveFileSafely(sourcePath, targetPath) {
+  if (sourcePath === targetPath || !fs.existsSync(sourcePath)) {
+    return;
+  }
+
+  ensureParentDir(targetPath);
+
+  try {
+    fs.renameSync(sourcePath, targetPath);
+  } catch (_error) {
+    const content = fs.readFileSync(sourcePath, "utf8");
+    fs.writeFileSync(targetPath, content, "utf8");
+    deleteNoteFileIfExists(sourcePath);
+  }
 }
 
 function saveIncomingState(rawPayload) {
@@ -400,19 +796,12 @@ function saveIncomingState(rawPayload) {
 
   const { state, noteContents } = normalizeStatePayload(rawPayload);
 
-  for (const note of state.notes) {
-    const previousNote = previousNotesById.get(note.id);
-    if (previousNote) {
-      note.fileName = sanitizeMdFileName(previousNote.fileName, note.id);
-    } else {
-      note.fileName = sanitizeMdFileName(note.fileName, note.id);
-    }
-  }
-
   const removedNotes = purgeExpiredNotes(state);
   for (const note of removedNotes) {
     deleteNoteFiles(note);
   }
+
+  assignNoteFileNamesFromTitles(state);
 
   for (const note of state.notes) {
     const previousNote = previousNotesById.get(note.id);
@@ -427,10 +816,14 @@ function saveIncomingState(rawPayload) {
           ? fs.readFileSync(targetPath, "utf8")
           : defaultNoteContent(note.title);
 
+    if (previousPath && previousPath !== targetPath) {
+      moveFileSafely(previousPath, targetPath);
+    }
+
+    ensureParentDir(targetPath);
     fs.writeFileSync(targetPath, content, "utf8");
   }
 
-  cleanupOrphanMarkdownFiles(state);
   writeStateMetadata(state);
 
   return state;
@@ -463,4 +856,12 @@ export function replaceState(rawPayload) {
 
 export function getStorageRootDir() {
   return DATA_DIR;
+}
+
+export function getNotesDir() {
+  return NOTES_DIR;
+}
+
+export function getTrashDir() {
+  return TRASH_DIR;
 }

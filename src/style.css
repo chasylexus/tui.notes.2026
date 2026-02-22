@@ -25,6 +25,7 @@ body.dark {
   height: 100vh;
   min-height: 0;
   min-width: 0;
+  position: relative;
 }
 
 .app-shell.folders-collapsed .folders-panel {
@@ -32,6 +33,22 @@ body.dark {
   min-width: 0 !important;
   border-right: 0;
   overflow: hidden;
+}
+
+.app-shell.editor-hidden .notes-resizer,
+.app-shell.editor-hidden .editor-pane {
+  display: none !important;
+}
+
+.app-shell.editor-hidden .notes-panel {
+  position: relative;
+  border-right: 1px solid #d9dde7;
+  box-shadow: inset -1px 0 0 #d9dde7;
+}
+
+body.dark .app-shell.editor-hidden .notes-panel {
+  border-right-color: #2a3040;
+  box-shadow: inset -1px 0 0 #2a3040;
 }
 
 .panel {
@@ -389,9 +406,19 @@ body.dark.is-resizing .panel-resizer::before {
 
 .editor-header-actions {
   margin-left: auto;
+  margin-right: 152px;
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.global-top-controls {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
 }
 
 .note-title-input {

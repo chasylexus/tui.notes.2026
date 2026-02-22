@@ -1,5 +1,11 @@
 import express from "express";
-import { getHydratedState, getStorageRootDir, replaceState } from "./store.js";
+import {
+  getHydratedState,
+  getNotesDir,
+  getStorageRootDir,
+  getTrashDir,
+  replaceState,
+} from "./store.js";
 
 const app = express();
 
@@ -9,7 +15,12 @@ const HOST = process.env.TUI_NOTES_API_HOST || "127.0.0.1";
 app.use(express.json({ limit: "25mb" }));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, storageRootDir: getStorageRootDir() });
+  res.json({
+    ok: true,
+    storageRootDir: getStorageRootDir(),
+    notesDir: getNotesDir(),
+    trashDir: getTrashDir(),
+  });
 });
 
 app.get("/api/state", (_req, res) => {

@@ -32,6 +32,7 @@ const NOTES_PANEL_MIN_WIDTH = 240;
 const MIN_EDITOR_WIDTH = 520;
 const PANEL_RESIZER_WIDTH = 6;
 const DESKTOP_BREAKPOINT = 860;
+const NOTE_TITLE_SUFFIX_LENGTH = 6;
 
 const ICONS = {
   folder:
@@ -347,7 +348,7 @@ app.innerHTML = `
         <div id="notes-leading" class="notes-leading">
           <span id="notes-title" class="panel-title">All Notes</span>
         </div>
-        <div class="panel-header-actions">
+        <div id="notes-header-actions" class="panel-header-actions">
           <button id="new-note-btn" class="panel-icon-btn" title="New note" aria-label="New note" type="button">
             <span class="ui-icon">${ICONS.newNote}</span>
           </button>
@@ -363,18 +364,21 @@ app.innerHTML = `
         <input id="note-title-input" class="note-title-input" placeholder="Untitled" />
         <div class="editor-header-actions">
           <span id="save-indicator" class="save-indicator">Saved</span>
-          <label class="theme-mode-control" for="theme-mode-select">
-            <span class="theme-mode-label">Theme</span>
-            <select id="theme-mode-select" class="theme-mode-select" aria-label="Theme mode">
-              <option value="auto">Auto</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </label>
         </div>
       </div>
       <div id="editor"></div>
     </main>
+
+    <div id="global-top-controls" class="global-top-controls">
+      <label id="theme-mode-control" class="theme-mode-control" for="theme-mode-select">
+        <span class="theme-mode-label">Theme</span>
+        <select id="theme-mode-select" class="theme-mode-select" aria-label="Theme mode">
+          <option value="auto">Auto</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+    </div>
   </div>
   <div id="context-menu" class="context-menu" aria-hidden="true"></div>
 `;
@@ -397,6 +401,7 @@ const elements = {
   newNoteBtn: document.querySelector("#new-note-btn"),
   noteTitleInput: document.querySelector("#note-title-input"),
   saveIndicator: document.querySelector("#save-indicator"),
+  themeModeControl: document.querySelector("#theme-mode-control"),
   themeModeSelect: document.querySelector("#theme-mode-select"),
   contextMenu: document.querySelector("#context-menu"),
 };
@@ -687,6 +692,26 @@ function createId() {
     return crypto.randomUUID();
   }
   return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createRandomToken(length = NOTE_TITLE_SUFFIX_LENGTH) {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const size = Number.isFinite(length) && length > 0 ? Math.floor(length) : NOTE_TITLE_SUFFIX_LENGTH;
+  if (size <= 0) {
+    return "";
+  }
+
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = new Uint8Array(size);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+  }
+
+  let value = "";
+  while (value.length < size) {
+    value += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return value;
 }
 
 function createDefaultState() {
@@ -1297,7 +1322,12 @@ function renderNotes() {
 
 function renderEditorHeader() {
   const note = getActiveNote();
-  if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
+  const hasActiveEditableNote =
+    Boolean(note) && selectedFolderId !== TRASH_FOLDER_ID && !isNoteInTrash(note);
+
+  elements.appShell.classList.toggle("editor-hidden", !hasActiveEditableNote);
+
+  if (!hasActiveEditableNote) {
     elements.noteTitleInput.value = "";
     elements.noteTitleInput.disabled = true;
     return;
@@ -1338,6 +1368,8 @@ function ensureActiveNote() {
 }
 
 function setActiveNote(noteId) {
+  commitActiveNoteTitleFromInput();
+
   const note = state.notes.find((item) => item.id === noteId && !isNoteInTrash(item));
   if (!note) {
     return;
@@ -1363,6 +1395,7 @@ function selectFolder(folderId) {
   if (!stateReady) {
     return;
   }
+  commitActiveNoteTitleFromInput();
   hideContextMenu();
 
   if (folderId === TRASH_FOLDER_ID || folderId === ROOT_FOLDER_ID || folderExists(folderId)) {
@@ -1512,6 +1545,81 @@ function nextDefaultNoteTitle(folderId) {
   return `Note ${Date.now()}`;
 }
 
+function normalizeNoteTitle(value) {
+  const title = String(value || "").trim();
+  return title || "Untitled";
+}
+
+function hasNoteTitleCollisionInFolder(title, folderId, excludeNoteId = null) {
+  const normalizedTitle = normalizeNoteTitle(title).toLowerCase();
+  const normalizedFolderId = folderId || null;
+
+  return getActiveNotes().some((note) => {
+    if (note.id === excludeNoteId) {
+      return false;
+    }
+    if ((note.folderId || null) !== normalizedFolderId) {
+      return false;
+    }
+    return note.title.toLowerCase() === normalizedTitle;
+  });
+}
+
+function buildUniqueNoteTitleWithSuffix(baseTitle, folderId, excludeNoteId = null) {
+  const normalizedBase = normalizeNoteTitle(baseTitle);
+
+  let attempt = 0;
+  while (attempt < 1000) {
+    const candidate = `${normalizedBase}-${createRandomToken()}`;
+    if (!hasNoteTitleCollisionInFolder(candidate, folderId, excludeNoteId)) {
+      return candidate;
+    }
+    attempt += 1;
+  }
+
+  return `${normalizedBase}-${Date.now()}`;
+}
+
+function resolveUniqueNoteTitleWithPrompt(title, folderId, excludeNoteId = null) {
+  let candidate = normalizeNoteTitle(title);
+
+  while (hasNoteTitleCollisionInFolder(candidate, folderId, excludeNoteId)) {
+    window.alert("A note with this name already exists in this folder. Please choose another name.");
+    const nextValue = window.prompt("Note name", candidate);
+    if (nextValue === null) {
+      return buildUniqueNoteTitleWithSuffix(candidate, folderId, excludeNoteId);
+    }
+    candidate = normalizeNoteTitle(nextValue);
+  }
+
+  return candidate;
+}
+
+function commitActiveNoteTitleFromInput() {
+  if (!stateReady) {
+    return;
+  }
+
+  const note = getActiveNote();
+  if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
+    return;
+  }
+
+  const requestedTitle = normalizeNoteTitle(elements.noteTitleInput.value);
+  const uniqueTitle = resolveUniqueNoteTitleWithPrompt(requestedTitle, note.folderId, note.id);
+
+  if (uniqueTitle !== note.title) {
+    note.title = uniqueTitle;
+    note.updatedAt = Date.now();
+    scheduleSaveIndicator("Saving...");
+    renderNotes();
+  }
+
+  if (elements.noteTitleInput.value !== uniqueTitle) {
+    elements.noteTitleInput.value = uniqueTitle;
+  }
+}
+
 function createNote() {
   if (!stateReady) {
     return;
@@ -1519,6 +1627,7 @@ function createNote() {
   if (selectedFolderId === TRASH_FOLDER_ID) {
     return;
   }
+  commitActiveNoteTitleFromInput();
 
   const folderId = getSelectedParentFolderId();
   const title = nextDefaultNoteTitle(folderId);
@@ -1552,16 +1661,16 @@ function renameNote(noteId) {
   }
 
   const value = window.prompt("Note name", note.title);
-  if (!value) {
+  if (value === null) {
     return;
   }
 
-  const name = value.trim();
-  if (!name || name === note.title) {
+  const nextTitle = resolveUniqueNoteTitleWithPrompt(value, note.folderId, note.id);
+  if (!nextTitle || nextTitle === note.title) {
     return;
   }
 
-  note.title = name;
+  note.title = nextTitle;
   note.updatedAt = Date.now();
   saveState();
   renderNotes();
@@ -1997,17 +2106,18 @@ function wireEvents() {
     setActiveNote(noteId);
   });
 
-  elements.noteTitleInput.addEventListener("input", () => {
-    const note = getActiveNote();
-    if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
+  elements.noteTitleInput.addEventListener("blur", () => {
+    commitActiveNoteTitleFromInput();
+  });
+
+  elements.noteTitleInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") {
       return;
     }
 
-    const nextTitle = elements.noteTitleInput.value.trim();
-    note.title = nextTitle || "Untitled";
-    note.updatedAt = Date.now();
-    scheduleSaveIndicator("Saving...");
-    renderNotes();
+    event.preventDefault();
+    commitActiveNoteTitleFromInput();
+    elements.noteTitleInput.blur();
   });
 
   elements.folderList.addEventListener("contextmenu", (event) => {
