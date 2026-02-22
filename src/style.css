@@ -1,7 +1,13 @@
 html,
-body,
+body {
+  height: 100%;
+}
+
 #app {
   height: 100%;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
 }
 
 * {
@@ -26,6 +32,7 @@ body.dark {
   min-height: 0;
   min-width: 0;
   position: relative;
+  overflow: hidden;
 }
 
 .app-shell.folders-collapsed .folders-panel {
@@ -475,6 +482,14 @@ body.dark.is-resizing .panel-resizer::before {
 .toastui-editor-defaultUI {
   height: 100%;
   border: 0;
+}
+
+/* Markdown paste uses an internal hidden textarea. Keep it in local coordinates
+   to avoid browser viewport jumps on focus during Cmd/Ctrl+V. */
+.toastui-editor-pseudo-clipboard {
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
 }
 
 .context-menu {
