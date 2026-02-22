@@ -1381,16 +1381,26 @@ function setActiveNote(noteId) {
 
   activeNoteId = note.id;
   ignoreEditorChange = true;
-  editor.setMarkdown(note.content || "", false, false, true);
-  editor.moveCursorToStart(true);
-  editor.setSelection(1, 1);
-  requestAnimationFrame(() => {
-    if (activeNoteId !== note.id) {
-      return;
+  try {
+    editor.setMarkdown(note.content || "", false, false, true);
+
+    if (editor.isMarkdownMode()) {
+      editor.setSelection([1, 1], [1, 1]);
+    } else {
+      editor.moveCursorToStart(true);
+      editor.setSelection(1, 1);
+      requestAnimationFrame(() => {
+        if (activeNoteId !== note.id || editor.isMarkdownMode()) {
+          return;
+        }
+        editor.setSelection(1, 1);
+      });
     }
-    editor.setSelection(1, 1);
-  });
-  ignoreEditorChange = false;
+  } catch (error) {
+    console.error("[tui.notes.2026] failed to switch active note", error);
+  } finally {
+    ignoreEditorChange = false;
+  }
   renderNotes();
   renderEditorHeader();
 }
