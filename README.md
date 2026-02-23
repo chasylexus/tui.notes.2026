@@ -52,6 +52,13 @@ tui-notes-2026 [options]
 ## Future Work
 
 - Delta persistence protocol: send and apply only changed entities/operations instead of full snapshots.
+- Temporary `postinstall` patches lifecycle:
+  - Keep `postinstall: patch-package` only while upstream fixes are not released in `@techie_doubts/*`.
+  - User-facing issues currently covered by patches:
+    - editor paste should not cause viewport/editor scroll jump on large paste;
+    - chart plugin options should merge predictably (plugin-level + block-level);
+    - chart tooltip formatting should stay consistent with axis thousands settings.
+  - Remove local patches + `patch-package` dependency after upstream package releases include these fixes.
 - Move temporary package patches from this app to upstream packages:
   - `@techie_doubts/tui.editor.2026`: keep paste focus without scroll jumps (`clipboard.focus({ preventScroll: true })` fallback-safe).
   - `@techie_doubts/editor-plugin-chart`: deep-merge plugin `chartOptions` with block options and expose `y.thousands` intent to tooltip formatting.

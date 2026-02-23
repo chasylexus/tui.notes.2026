@@ -1657,6 +1657,7 @@ function clearEditorSelection() {
   activeNoteId = null;
   ignoreEditorChange = true;
   editor.setMarkdown("");
+  resetEditorUndoRedoHistory();
   ignoreEditorChange = false;
   renderEditorHeader();
 }
@@ -1709,6 +1710,7 @@ function setActiveNote(noteId) {
         editor.setSelection(1, 1);
       });
     }
+    resetEditorUndoRedoHistory();
   } catch (error) {
     console.error("[tui.notes.2026] failed to switch active note", error);
   } finally {
@@ -1716,6 +1718,32 @@ function setActiveNote(noteId) {
   }
   renderNotes();
   renderEditorHeader();
+}
+
+function resetEditorUndoRedoHistory() {
+  if (!editor || typeof editor !== "object") {
+    return;
+  }
+
+  const editorCore = editor;
+  const snapshotHistory = editorCore.snapshotHistory;
+  if (!snapshotHistory || typeof snapshotHistory !== "object") {
+    return;
+  }
+
+  if (Array.isArray(snapshotHistory.undoStack)) {
+    snapshotHistory.undoStack.length = 0;
+  }
+  if (Array.isArray(snapshotHistory.redoStack)) {
+    snapshotHistory.redoStack.length = 0;
+  }
+
+  if (
+    typeof editorCore.pushSnapshot === "function" &&
+    typeof editorCore.getMarkdown === "function"
+  ) {
+    editorCore.pushSnapshot(editorCore.getMarkdown());
+  }
 }
 
 function selectFolder(folderId) {
@@ -1977,7 +2005,6 @@ function createNote() {
   };
 
   state.notes.push(note);
-  activeNoteId = note.id;
   saveState();
   renderAll();
   setActiveNote(note.id);
