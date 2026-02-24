@@ -22,13 +22,11 @@
     "bin",
     "dist",
     "server",
-    "patches",
     "tui-notes.config.example.json",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "patch-package",
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
     "dev:client": "vite --host 127.0.0.1 --port 8080",
     "dev:server": "node server/index.js",
@@ -57,7 +55,6 @@
     "express": "^4.21.2",
     "katex": "^0.16.28",
     "mermaid": "^11.12.0",
-    "patch-package": "^8.0.1",
     "prismjs": "^1.30.0",
     "prosemirror-transform": "1.4.2"
   },
