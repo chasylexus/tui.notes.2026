@@ -1,10 +1,14 @@
 import Editor from "@techie_doubts/tui.editor.2026";
 import chart from "@techie_doubts/editor-plugin-chart";
+import abcPlugin from "@techie_doubts/editor-plugin-abc";
 import codeSyntaxHighlight from "@techie_doubts/editor-plugin-code-syntax-highlight";
 import colorSyntax from "@techie_doubts/editor-plugin-color-syntax";
 import exportPlugin from "@techie_doubts/editor-plugin-export";
+import flowchartPlugin from "@techie_doubts/editor-plugin-flowchart";
+import graphvizPlugin from "@techie_doubts/editor-plugin-graphviz";
 import katexPlugin from "@techie_doubts/editor-plugin-katex";
 import mermaidPlugin from "@techie_doubts/editor-plugin-mermaid";
+import sequencePlugin from "@techie_doubts/editor-plugin-sequence";
 import tableMergedCell from "@techie_doubts/editor-plugin-table-merged-cell";
 import uml from "@techie_doubts/editor-plugin-uml";
 import Prism from "prismjs";
@@ -1241,7 +1245,11 @@ function initEditor() {
       colorSyntax,
       tableMergedCell,
       uml,
+      sequencePlugin,
       mermaidPlugin,
+      flowchartPlugin,
+      graphvizPlugin,
+      abcPlugin,
       katexPlugin,
       [exportPlugin, { toolbarGroupIndex: 99, toolbarItemIndex: 1 }],
     ],
