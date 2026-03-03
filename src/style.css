@@ -789,6 +789,218 @@ body.dark .context-menu-item.danger {
   display: none;
 }
 
+.tui-notes-media-popup-wrapper .toastui-editor-popup-body {
+  padding: 0;
+}
+
+.tn-media-popup {
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  min-width: 320px;
+}
+
+.tn-media-row {
+  display: grid;
+  gap: 6px;
+}
+
+.tn-media-size-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tn-media-label {
+  font-size: 12px;
+  color: #6f7b96;
+}
+
+.tn-media-input {
+  width: 100%;
+  border: 1px solid #d4dbe9;
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
+  color: #1e2533;
+  background: #fff;
+}
+
+.tn-media-actions,
+.tn-media-record {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tn-media-btn {
+  border: 1px solid #cfd8ec;
+  background: #f6f9ff;
+  color: #1f2e4a;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tn-media-btn:hover:not(:disabled) {
+  background: #edf4ff;
+}
+
+.tn-media-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tn-media-file-input {
+  display: none;
+}
+
+.tn-media-status {
+  min-height: 18px;
+  font-size: 12px;
+  color: #77829d;
+}
+
+.tn-media-status[data-variant="ok"] {
+  color: #1f7a38;
+}
+
+.tn-media-status[data-variant="error"] {
+  color: #c12f2f;
+}
+
+.tn-media-status[data-variant="recording"] {
+  color: #b04510;
+}
+
+.toastui-editor-contents .tn-media {
+  margin: 0.75em 0;
+}
+
+.toastui-editor-contents .tn-media audio,
+.toastui-editor-contents .tn-media video,
+.toastui-editor-contents .tn-media iframe {
+  width: 100%;
+  max-width: 860px;
+  border-radius: 10px;
+  border: 1px solid #dce3f1;
+  background: #0f1522;
+}
+
+.toastui-editor-contents .tn-media img {
+  max-width: 100%;
+  border-radius: 10px;
+  border: 1px solid #dce3f1;
+}
+
+.toastui-editor-contents .tn-media-video-host iframe {
+  aspect-ratio: 16 / 9;
+  min-height: 240px;
+}
+
+.toastui-editor-contents .tn-audio-recorder-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px dashed #bfd0ea;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f7faff;
+}
+
+.toastui-editor-contents .tn-audio-recorder-action {
+  border: 1px solid #bfd0ea;
+  background: #fff;
+  color: #1f355f;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.toastui-editor-contents .tn-audio-recorder-action.is-recording {
+  border-color: #dc8f69;
+  color: #a13b0f;
+  background: #fff2eb;
+}
+
+.toastui-editor-contents .tn-audio-recorder-status {
+  font-size: 12px;
+  color: #6d7892;
+}
+
+.toastui-editor-contents .tn-audio-recorder-status.is-error {
+  color: #c12f2f;
+}
+
+body.dark .tn-media-label {
+  color: #97a5c7;
+}
+
+body.dark .tn-media-input {
+  border-color: #3b465c;
+  color: #e4ebfb;
+  background: #212938;
+}
+
+body.dark .tn-media-btn {
+  border-color: #3d4a63;
+  color: #dde8ff;
+  background: #243047;
+}
+
+body.dark .tn-media-btn:hover:not(:disabled) {
+  background: #2a3a58;
+}
+
+body.dark .tn-media-status {
+  color: #a6b5d6;
+}
+
+body.dark .tn-media-status[data-variant="ok"] {
+  color: #8de2a2;
+}
+
+body.dark .tn-media-status[data-variant="error"] {
+  color: #ff9b9b;
+}
+
+body.dark .toastui-editor-contents .tn-audio-recorder-box {
+  border-color: #3a4f71;
+  background: #1e293a;
+}
+
+body.dark .toastui-editor-contents .tn-audio-recorder-action {
+  border-color: #4a6186;
+  color: #dce7ff;
+  background: #27354c;
+}
+
+body.dark .toastui-editor-contents .tn-audio-recorder-action.is-recording {
+  border-color: #b77859;
+  color: #ffd2be;
+  background: #4a2c1f;
+}
+
+body.dark .toastui-editor-contents .tn-audio-recorder-status {
+  color: #9cb0d4;
+}
+
+body.dark .toastui-editor-contents .tn-audio-recorder-status.is-error {
+  color: #ff9b9b;
+}
+
+body.dark .toastui-editor-contents .tn-media audio,
+body.dark .toastui-editor-contents .tn-media video,
+body.dark .toastui-editor-contents .tn-media iframe {
+  border-color: #3a445d;
+}
+
+body.dark .toastui-editor-contents .tn-media img {
+  border-color: #3a445d;
+}
+
 @media (max-width: 1100px) {
   .folders-panel {
     width: 240px;
