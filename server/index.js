@@ -11,8 +11,17 @@ import {
   getTrashDir,
   replaceState,
 } from "./store.js";
+import { authContextMiddleware, getAuthMode, requireAuthentication } from "./auth.js";
+import { createAclStore } from "./acl-store.js";
+import { AclService, getWorkspaceResource } from "./acl-service.js";
 
 const app = express();
+const aclStore = await createAclStore({ storageRootDir: getStorageRootDir() });
+const aclService = new AclService({
+  store: aclStore,
+  authModeProvider: getAuthMode,
+  logger: console,
+});
 
 const PORT = Number(process.env.TUI_NOTES_API_PORT || 8787);
 const HOST = process.env.TUI_NOTES_API_HOST || "127.0.0.1";
@@ -285,6 +294,52 @@ function resolveServeDistMode() {
   return fs.existsSync(DIST_INDEX_FILE);
 }
 
+function getRequestAuthContext(req) {
+  return req.authContext || {
+    mode: getAuthMode(),
+    user: {
+      id: "anonymous",
+      userId: "",
+      email: "",
+      groups: [],
+      isAuthenticated: false,
+      displayName: "anonymous",
+    },
+    isAuthenticated: false,
+    isEnforced: getAuthMode() === "enforce",
+    isObserve: getAuthMode() === "observe",
+    isOff: getAuthMode() === "off",
+  };
+}
+
+function ensureAuthOrReject(req, res) {
+  const context = getRequestAuthContext(req);
+  if (context.isEnforced && !context.isAuthenticated) {
+    res.status(401).json({ message: "Authentication required." });
+    return null;
+  }
+  return context;
+}
+
+async function ensureAclStateFromState(fullState, req) {
+  await aclService.syncResourcesFromState(fullState);
+  const context = getRequestAuthContext(req);
+  if (context?.isAuthenticated) {
+    await aclService.ensureBootstrapOwner(context.user);
+  }
+}
+
+async function toScopedStateForRequest(fullState, req) {
+  const context = getRequestAuthContext(req);
+  const scoped = await aclService.filterStateForUser(fullState, context.user, {
+    mode: context.mode || getAuthMode(),
+  });
+  return {
+    ...scoped,
+    _meta: fullState?._meta,
+  };
+}
+
 function writeSseEvent(response, eventName, payload) {
   const id = String(++sseEventId);
   response.write(`id: ${id}\n`);
@@ -321,12 +376,33 @@ function broadcastStateRevision(nextState) {
   }
 }
 
+function broadcastPermissionsChanged(payload = {}) {
+  const data = {
+    updatedAt: Date.now(),
+    ...payload,
+  };
+
+  for (const client of sseClients) {
+    try {
+      writeSseEvent(client, "permissions-changed", data);
+    } catch (_error) {
+      try {
+        client.end();
+      } catch (_endError) {
+        // Ignore close errors for dead sockets.
+      }
+      sseClients.delete(client);
+    }
+  }
+}
+
 const shouldServeDist = resolveServeDistMode();
 if (shouldServeDist && fs.existsSync(DIST_DIR)) {
   app.use(express.static(DIST_DIR));
 }
 
 app.use(express.json({ limit: "25mb" }));
+app.use(authContextMiddleware);
 app.use("/api", (_req, res, next) => {
   res.set("Cache-Control", "no-store");
   next();
@@ -335,48 +411,217 @@ app.use("/api", (_req, res, next) => {
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
+    authMode: getAuthMode(),
     storageRootDir: getStorageRootDir(),
     notesDir: getNotesDir(),
     trashDir: getTrashDir(),
   });
 });
 
-app.get("/api/state", (_req, res) => {
-  const state = getHydratedState();
-  res.json(state);
+app.get("/api/me", requireAuthentication, async (req, res, next) => {
+  try {
+    const fullState = getHydratedState();
+    await ensureAclStateFromState(fullState, req);
+    const context = getRequestAuthContext(req);
+    const viewerContext = await aclService.getViewerContext(context.user, {
+      mode: context.mode,
+    });
+    res.json(viewerContext);
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.get("/api/events", (_req, res) => {
-  res.status(200);
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders?.();
+app.get("/api/me/capabilities", requireAuthentication, async (req, res, next) => {
+  try {
+    const resourceTypeRaw = String(req.query?.type || "").trim().toLowerCase();
+    const resourceExternalIdRaw = String(req.query?.externalId || "").trim();
+    const resource = resourceTypeRaw && resourceExternalIdRaw
+      ? { type: resourceTypeRaw, externalId: resourceExternalIdRaw }
+      : getWorkspaceResource();
 
-  sseClients.add(res);
+    const fullState = getHydratedState();
+    await ensureAclStateFromState(fullState, req);
 
-  writeSseEvent(res, "connected", {
-    revision: Number(getHydratedState()?._meta?.revision) || 0,
-    connectedAt: Date.now(),
-  });
+    const context = getRequestAuthContext(req);
+    const capabilities = await aclService.getCapabilitiesForResource(context.user, {
+      resourceType: resource.type,
+      resourceExternalId: resource.externalId,
+      mode: context.mode,
+    });
 
-  const keepalive = setInterval(() => {
-    try {
-      res.write(": keepalive\n\n");
-    } catch (_error) {
+    res.json({
+      resourceType: resource.type,
+      resourceExternalId: resource.externalId,
+      ...capabilities,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/state", requireAuthentication, async (req, res, next) => {
+  try {
+    const context = ensureAuthOrReject(req, res);
+    if (!context) {
+      return;
+    }
+
+    const fullState = getHydratedState();
+    await ensureAclStateFromState(fullState, req);
+    const scopedState = await toScopedStateForRequest(fullState, req);
+    res.json(scopedState);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/acl/resource/:resourceType/:resourceExternalId", requireAuthentication, async (req, res, next) => {
+  try {
+    const context = ensureAuthOrReject(req, res);
+    if (!context) {
+      return;
+    }
+
+    const resourceType = String(req.params?.resourceType || "").trim();
+    const resourceExternalId = String(req.params?.resourceExternalId || "").trim();
+    if (!resourceType || !resourceExternalId) {
+      res.status(400).json({ message: "resourceType and resourceExternalId are required." });
+      return;
+    }
+
+    const fullState = getHydratedState();
+    await ensureAclStateFromState(fullState, req);
+
+    const bindings = await aclService.listBindingsForResource({
+      actorUser: context.user,
+      resourceType,
+      resourceExternalId,
+      mode: context.mode,
+    });
+
+    res.json({
+      resourceType,
+      resourceExternalId,
+      bindings,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/acl/grant", requireAuthentication, async (req, res, next) => {
+  try {
+    const context = ensureAuthOrReject(req, res);
+    if (!context) {
+      return;
+    }
+    if (!req.body || typeof req.body !== "object") {
+      res.status(400).json({ message: "Request body must be an object." });
+      return;
+    }
+
+    const fullState = getHydratedState();
+    await ensureAclStateFromState(fullState, req);
+
+    const binding = await aclService.grantBinding({
+      actorUser: context.user,
+      mode: context.mode,
+      bindingInput: req.body,
+    });
+
+    broadcastPermissionsChanged({
+      resourceType: binding.resourceType,
+      resourceExternalId: binding.resourceExternalId,
+      operation: "grant",
+    });
+
+    res.json({ ok: true, binding });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/acl/grant/:bindingId", requireAuthentication, async (req, res, next) => {
+  try {
+    const context = ensureAuthOrReject(req, res);
+    if (!context) {
+      return;
+    }
+    const bindingId = String(req.params?.bindingId || "").trim();
+    if (!bindingId) {
+      res.status(400).json({ message: "bindingId is required." });
+      return;
+    }
+
+    const fullState = getHydratedState();
+    await ensureAclStateFromState(fullState, req);
+
+    const deleted = await aclService.revokeBinding({
+      actorUser: context.user,
+      mode: context.mode,
+      bindingId,
+    });
+
+    if (deleted) {
+      broadcastPermissionsChanged({
+        operation: "revoke",
+        bindingId,
+      });
+    }
+
+    res.json({ ok: true, deleted });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/events", requireAuthentication, async (req, res, next) => {
+  try {
+    const context = ensureAuthOrReject(req, res);
+    if (!context) {
+      return;
+    }
+
+    const fullState = getHydratedState();
+    await ensureAclStateFromState(fullState, req);
+    const scopedState = await toScopedStateForRequest(fullState, req);
+
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+
+    sseClients.add(res);
+
+    writeSseEvent(res, "connected", {
+      revision: Number(scopedState?._meta?.revision) || 0,
+      connectedAt: Date.now(),
+      authMode: context.mode,
+      user: context.user?.displayName || context.user?.id || "anonymous",
+    });
+
+    const keepalive = setInterval(() => {
+      try {
+        res.write(": keepalive\n\n");
+      } catch (_error) {
+        clearInterval(keepalive);
+        sseClients.delete(res);
+      }
+    }, SSE_KEEPALIVE_MS);
+
+    res.on("close", () => {
       clearInterval(keepalive);
       sseClients.delete(res);
-    }
-  }, SSE_KEEPALIVE_MS);
-
-  res.on("close", () => {
-    clearInterval(keepalive);
-    sseClients.delete(res);
-  });
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
-function handleGetMediaFile(req, res) {
+async function handleGetMediaFile(req, res) {
   const noteId = String(req.query?.noteId || "").trim();
   const mediaPath = String(req.query?.path || "").trim();
   const requestedKind = String(req.query?.kind || "").trim().toLowerCase();
@@ -390,6 +635,19 @@ function handleGetMediaFile(req, res) {
     res.status(404).json({ message: "Note not found." });
     return;
   }
+
+  const context = ensureAuthOrReject(req, res);
+  if (!context) {
+    return;
+  }
+  const fullState = getHydratedState();
+  await ensureAclStateFromState(fullState, req);
+  await aclService.assertAllowed(context.user, {
+    action: "read",
+    resourceType: "note",
+    resourceExternalId: note.id,
+    mode: context.mode,
+  });
 
   const absolutePath = resolveRequestedMediaFilePath(note, mediaPath, requestedKind);
   if (!absolutePath || !fs.existsSync(absolutePath)) {
@@ -411,16 +669,22 @@ function handleGetMediaFile(req, res) {
   res.sendFile(absolutePath);
 }
 
-app.get("/api/media/file", handleGetMediaFile);
-app.get("/api/media/file/:fileName", handleGetMediaFile);
+app.get("/api/media/file", (req, res, next) => {
+  Promise.resolve(handleGetMediaFile(req, res)).catch(next);
+});
+app.get("/api/media/file/:fileName", (req, res, next) => {
+  Promise.resolve(handleGetMediaFile(req, res)).catch(next);
+});
 
 app.post(
   "/api/media/upload",
+  requireAuthentication,
   express.raw({
     type: () => true,
     limit: MAX_MEDIA_UPLOAD_BYTES,
   }),
-  (req, res) => {
+  async (req, res, next) => {
+    try {
     const noteId = String(req.query?.noteId || "").trim();
     const kindRaw = String(req.query?.kind || "").trim().toLowerCase();
     const originalFileName = String(req.query?.fileName || "").trim();
@@ -442,6 +706,19 @@ app.post(
       res.status(404).json({ message: "Note not found." });
       return;
     }
+
+    const context = ensureAuthOrReject(req, res);
+    if (!context) {
+      return;
+    }
+    const fullState = getHydratedState();
+    await ensureAclStateFromState(fullState, req);
+    await aclService.assertAllowed(context.user, {
+      action: "write",
+      resourceType: "note",
+      resourceExternalId: note.id,
+      mode: context.mode,
+    });
 
     const rawBody = Buffer.isBuffer(req.body)
       ? req.body
@@ -473,33 +750,66 @@ app.post(
         message: error?.message || "Failed to save uploaded media.",
       });
     }
-  },
+    } catch (error) {
+      next(error);
+    }
+  }
 );
 
-function handleStateWrite(req, res) {
+async function handleStateWrite(req, res, next) {
   if (!req.body || typeof req.body !== "object") {
     res.status(400).json({ message: "Request body must be a state object." });
     return;
   }
 
   try {
-    const nextState = replaceState(req.body);
+    const context = ensureAuthOrReject(req, res);
+    if (!context) {
+      return;
+    }
+
+    const currentFullState = getHydratedState();
+    await ensureAclStateFromState(currentFullState, req);
+
+    const mergedState = await aclService.mergeScopedStateForWrite({
+      currentFullState,
+      incomingScopedState: req.body,
+      user: context.user,
+      mode: context.mode,
+    });
+
+    const nextState = replaceState({
+      ...mergedState,
+      _meta: req.body?._meta,
+    });
+
+    await ensureAclStateFromState(nextState, req);
     broadcastStateRevision(nextState);
-    res.json(nextState);
+    const scopedState = await toScopedStateForRequest(nextState, req);
+    res.json(scopedState);
   } catch (error) {
     if (Number(error?.status) === 409) {
+      let scopedConflictState = error?.payload?.state || null;
+      if (scopedConflictState && typeof scopedConflictState === "object") {
+        try {
+          scopedConflictState = await toScopedStateForRequest(scopedConflictState, req);
+        } catch (_scopeError) {
+          scopedConflictState = null;
+        }
+      }
       res.status(409).json({
         message: error.message || "State conflict detected.",
         ...(error?.payload && typeof error.payload === "object" ? error.payload : {}),
+        ...(scopedConflictState ? { state: scopedConflictState } : {}),
       });
       return;
     }
-    throw error;
+    next(error);
   }
 }
 
-app.put("/api/state", handleStateWrite);
-app.post("/api/state", handleStateWrite);
+app.put("/api/state", requireAuthentication, handleStateWrite);
+app.post("/api/state", requireAuthentication, handleStateWrite);
 
 if (shouldServeDist && fs.existsSync(DIST_INDEX_FILE)) {
   app.get("*", (req, res, next) => {
@@ -514,12 +824,17 @@ if (shouldServeDist && fs.existsSync(DIST_INDEX_FILE)) {
 app.use((error, _req, res, _next) => {
   // eslint-disable-next-line no-console
   console.error("[tui.notes.2026][api]", error);
-  res.status(500).json({ message: "Unknown server error." });
+  const status = Number(error?.status);
+  const responseStatus = Number.isInteger(status) && status >= 400 && status < 600 ? status : 500;
+  res.status(responseStatus).json({
+    message: error?.message || "Unknown server error.",
+    ...(error?.details && typeof error.details === "object" ? { details: error.details } : {}),
+  });
 });
 
 app.listen(PORT, HOST, () => {
   // eslint-disable-next-line no-console
   console.log(
-    `[tui.notes.2026][api] listening on http://${HOST}:${PORT} (storage: ${getStorageRootDir()}, serveDist: ${String(shouldServeDist)})`,
+    `[tui.notes.2026][api] listening on http://${HOST}:${PORT} (storage: ${getStorageRootDir()}, serveDist: ${String(shouldServeDist)}, authMode: ${getAuthMode()})`,
   );
 });

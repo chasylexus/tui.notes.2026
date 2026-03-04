@@ -789,6 +789,19 @@ body.dark .context-menu-item.danger {
   display: none;
 }
 
+.toastui-editor-defaultUI.is-readonly .toastui-editor-main {
+  opacity: 0.92;
+}
+
+.toastui-editor-defaultUI.is-readonly .toastui-editor-toolbar {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+.note-title-input.is-readonly {
+  opacity: 0.75;
+}
+
 @media (max-width: 1100px) {
   .folders-panel {
     width: 240px;

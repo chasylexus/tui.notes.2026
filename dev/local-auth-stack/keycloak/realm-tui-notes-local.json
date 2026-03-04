@@ -1,0 +1,92 @@
+{
+  "realm": "tui-notes-local",
+  "enabled": true,
+  "displayName": "TUI Notes Local",
+  "registrationAllowed": false,
+  "rememberMe": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "groups": [
+    {
+      "name": "engineering"
+    },
+    {
+      "name": "readers"
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "tui-notes-local-client",
+      "name": "tui-notes-local-client",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "tui-notes-local-secret",
+      "redirectUris": [
+        "http://127.0.0.1:4180/oauth2/callback"
+      ],
+      "webOrigins": [
+        "http://127.0.0.1:4180"
+      ],
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "attributes": {
+        "post.logout.redirect.uris": "http://127.0.0.1:4180/*"
+      },
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Owner",
+      "email": "alice@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Alice123!",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/engineering"
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Viewer",
+      "email": "bob@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Bob123!",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/readers"
+      ]
+    }
+  ]
+}

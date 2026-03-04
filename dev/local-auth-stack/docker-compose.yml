@@ -1,0 +1,76 @@
+services:
+  keycloak-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    volumes:
+      - keycloak_db_data:/var/lib/postgresql/data
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.5.2
+    command: start-dev --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: keycloak-db
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak/realm-tui-notes-local.json:/opt/keycloak/data/import/realm-tui-notes-local.json:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - keycloak-db
+
+  notes:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -lc "npm ci && node server/index.js"
+    environment:
+      TUI_NOTES_API_HOST: 0.0.0.0
+      TUI_NOTES_API_PORT: 8787
+      TUI_NOTES_SERVE_DIST: "1"
+      TUI_NOTES_AUTH_MODE: enforce
+      TUI_NOTES_BOOTSTRAP_OWNER_EMAIL: alice@example.com
+      TUI_NOTES_ROOT_DIR: /notes-data
+    volumes:
+      - ../../:/app
+      - notes_data:/notes-data
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.14.0
+    environment:
+      OAUTH2_PROXY_PROVIDER: keycloak-oidc
+      OAUTH2_PROXY_OIDC_ISSUER_URL: http://keycloak:8080/realms/tui-notes-local
+      OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "true"
+      OAUTH2_PROXY_LOGIN_URL: http://127.0.0.1:8080/realms/tui-notes-local/protocol/openid-connect/auth
+      OAUTH2_PROXY_REDEEM_URL: http://keycloak:8080/realms/tui-notes-local/protocol/openid-connect/token
+      OAUTH2_PROXY_OIDC_JWKS_URL: http://keycloak:8080/realms/tui-notes-local/protocol/openid-connect/certs
+      OAUTH2_PROXY_CLIENT_ID: tui-notes-local-client
+      OAUTH2_PROXY_CLIENT_SECRET: tui-notes-local-secret
+      OAUTH2_PROXY_REDIRECT_URL: http://127.0.0.1:4180/oauth2/callback
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_UPSTREAMS: http://notes:8787/
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_SCOPE: "openid profile email"
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_COOKIE_SECURE: "false"
+      OAUTH2_PROXY_COOKIE_SAMESITE: lax
+      OAUTH2_PROXY_COOKIE_SECRET: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    ports:
+      - "4180:4180"
+    depends_on:
+      - keycloak
+      - notes
+
+volumes:
+  keycloak_db_data:
+  notes_data:

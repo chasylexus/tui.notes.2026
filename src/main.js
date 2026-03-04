@@ -26,6 +26,8 @@ import "katex/dist/katex.min.css";
 import "./style.css";
 
 const STATE_API_ENDPOINT = "/api/state";
+const ME_API_ENDPOINT = "/api/me";
+const CAPABILITIES_API_ENDPOINT = "/api/me/capabilities";
 const EVENTS_API_ENDPOINT = "/api/events";
 const MEDIA_UPLOAD_ENDPOINT = "/api/media/upload";
 const MEDIA_FILE_ENDPOINT = "/api/media/file";
@@ -240,6 +242,22 @@ let remoteEventsSource = null;
 let remoteEventsReconnectTimer = null;
 let pendingRemoteRevision = 0;
 let lastSyncedSnapshot = null;
+let authMode = "off";
+let workspaceCapabilities = {
+  canRead: true,
+  canWrite: true,
+  canManage: true,
+};
+let selectedFolderCapabilities = {
+  canRead: true,
+  canWrite: true,
+  canManage: true,
+};
+let activeNoteCapabilities = {
+  canRead: true,
+  canWrite: true,
+  canManage: true,
+};
 
 ensureValidStateShape();
 initializeExpandedFolders();
@@ -822,6 +840,308 @@ async function apiRequest(url, options = {}) {
   return response.json();
 }
 
+function normalizeCapabilitiesPayload(payload) {
+  return {
+    canRead: Boolean(payload?.canRead),
+    canWrite: Boolean(payload?.canWrite),
+    canManage: Boolean(payload?.canManage),
+  };
+}
+
+function hasWritePermissionForSelectedFolder() {
+  if (authMode === "off") {
+    return true;
+  }
+  if (selectedFolderId === TRASH_FOLDER_ID) {
+    return false;
+  }
+  if (selectedFolderId === ROOT_FOLDER_ID) {
+    return Boolean(workspaceCapabilities.canWrite);
+  }
+  return Boolean(selectedFolderCapabilities.canWrite);
+}
+
+function hasWritePermissionForActiveNote() {
+  if (authMode === "off") {
+    return true;
+  }
+  return Boolean(activeNoteCapabilities.canWrite);
+}
+
+function applyAccessUiState() {
+  const canWriteFolder = hasWritePermissionForSelectedFolder();
+  const canWriteNote = hasWritePermissionForActiveNote();
+
+  elements.newFolderBtn.disabled = !canWriteFolder;
+  elements.newNoteBtn.disabled = selectedFolderId === TRASH_FOLDER_ID || !canWriteFolder;
+
+  const note = getActiveNote();
+  const editable =
+    Boolean(note) &&
+    selectedFolderId !== TRASH_FOLDER_ID &&
+    !isNoteInTrash(note) &&
+    canWriteNote;
+
+  elements.noteTitleInput.readOnly = !editable;
+  elements.noteTitleInput.classList.toggle("is-readonly", !editable);
+
+  const toolbar = document.querySelector(".toastui-editor-toolbar");
+  if (toolbar instanceof HTMLElement) {
+    toolbar.classList.toggle("is-readonly", !editable);
+  }
+  const editorRoot = document.querySelector(".toastui-editor-defaultUI");
+  if (editorRoot instanceof HTMLElement) {
+    editorRoot.classList.toggle("is-readonly", !editable);
+  }
+
+  if (authMode !== "off" && !editable) {
+    elements.saveIndicator.textContent = "Read-only";
+  }
+}
+
+async function refreshViewerContext() {
+  try {
+    const payload = await apiRequest(ME_API_ENDPOINT);
+    authMode = String(payload?.authMode || "off");
+    workspaceCapabilities = normalizeCapabilitiesPayload(payload?.workspace);
+  } catch (error) {
+    if (Number(error?.status) === 401 || Number(error?.status) === 403) {
+      authMode = "enforce";
+      workspaceCapabilities = { canRead: false, canWrite: false, canManage: false };
+      return;
+    }
+    throw error;
+  }
+}
+
+async function fetchCapabilities(resourceType, externalId) {
+  const query = new URLSearchParams({
+    type: resourceType,
+    externalId: String(externalId),
+  });
+  const payload = await apiRequest(`${CAPABILITIES_API_ENDPOINT}?${query.toString()}`);
+  return normalizeCapabilitiesPayload(payload);
+}
+
+function normalizeAclSubjectInput(rawValue) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (raw === "*" || raw.toLowerCase() === "public:*") {
+    return { subjectType: "public", subjectId: "*" };
+  }
+
+  const colonIndex = raw.indexOf(":");
+  if (colonIndex <= 0) {
+    return {
+      subjectType: "user",
+      subjectId: raw.toLowerCase(),
+    };
+  }
+
+  const subjectType = raw.slice(0, colonIndex).trim().toLowerCase();
+  const subjectId = raw.slice(colonIndex + 1).trim();
+  if (!subjectType || !subjectId) {
+    return null;
+  }
+  if (!["user", "group", "public"].includes(subjectType)) {
+    return null;
+  }
+  if (subjectType === "public") {
+    return { subjectType, subjectId: "*" };
+  }
+  return {
+    subjectType,
+    subjectId: subjectType === "user" ? subjectId.toLowerCase() : subjectId,
+  };
+}
+
+function normalizeAclRoleInput(rawValue) {
+  const role = String(rawValue || "").trim().toLowerCase();
+  if (role === "viewer" || role === "editor" || role === "owner") {
+    return role;
+  }
+  return null;
+}
+
+async function fetchAclBindings(resourceType, resourceExternalId) {
+  const safeType = encodeURIComponent(String(resourceType || ""));
+  const safeId = encodeURIComponent(String(resourceExternalId || ""));
+  const payload = await apiRequest(`/api/acl/resource/${safeType}/${safeId}`);
+  return Array.isArray(payload?.bindings) ? payload.bindings : [];
+}
+
+async function grantAclBinding(binding) {
+  return apiRequest("/api/acl/grant", {
+    method: "POST",
+    body: JSON.stringify(binding),
+  });
+}
+
+async function revokeAclBinding(bindingId) {
+  const safeId = encodeURIComponent(String(bindingId || ""));
+  return apiRequest(`/api/acl/grant/${safeId}`, {
+    method: "DELETE",
+  });
+}
+
+function formatAclBindingLine(binding, index) {
+  const inheritLabel = binding?.inherit === false ? "direct only" : "inherit";
+  return `${index + 1}. ${binding.subjectType}:${binding.subjectId} -> ${binding.role} (${inheritLabel}) [${binding.id}]`;
+}
+
+async function manageResourceAccess(resourceType, resourceExternalId, resourceLabel) {
+  if (authMode === "off") {
+    window.alert("Access control is disabled.");
+    return;
+  }
+
+  const capabilities = await fetchCapabilities(resourceType, resourceExternalId);
+  if (!capabilities.canManage) {
+    window.alert("You do not have permission to manage access for this resource.");
+    return;
+  }
+
+  let shouldContinue = true;
+  while (shouldContinue) {
+    const bindings = await fetchAclBindings(resourceType, resourceExternalId);
+    const bindingLines = bindings.length
+      ? bindings.map((binding, index) => formatAclBindingLine(binding, index)).join("\n")
+      : "(no explicit bindings)";
+
+    const commandRaw = window.prompt(
+      `Access: ${resourceLabel}\n\nCurrent bindings:\n${bindingLines}\n\nCommands:\n- add\n- remove\n- cancel`,
+      "add",
+    );
+
+    if (commandRaw === null) {
+      break;
+    }
+
+    const command = String(commandRaw).trim().toLowerCase();
+    if (!command || command === "cancel" || command === "exit") {
+      break;
+    }
+
+    if (command === "add") {
+      const subjectRaw = window.prompt(
+        "Subject (user:<email>, group:<name>, public:*)",
+        "user:bob@example.com",
+      );
+      if (subjectRaw === null) {
+        continue;
+      }
+      const subject = normalizeAclSubjectInput(subjectRaw);
+      if (!subject) {
+        window.alert("Invalid subject format.");
+        continue;
+      }
+
+      const roleRaw = window.prompt("Role (viewer|editor|owner)", "viewer");
+      if (roleRaw === null) {
+        continue;
+      }
+      const role = normalizeAclRoleInput(roleRaw);
+      if (!role) {
+        window.alert("Invalid role.");
+        continue;
+      }
+
+      const inheritDefault = resourceType === "note" ? "no" : "yes";
+      const inheritRaw = window.prompt("Inherit to children? (yes|no)", inheritDefault);
+      if (inheritRaw === null) {
+        continue;
+      }
+      const inherit = !["no", "n", "0", "false"].includes(String(inheritRaw).trim().toLowerCase());
+
+      await grantAclBinding({
+        resourceType,
+        resourceExternalId,
+        subjectType: subject.subjectType,
+        subjectId: subject.subjectId,
+        role,
+        inherit,
+      });
+      continue;
+    }
+
+    if (command === "remove") {
+      if (!bindings.length) {
+        window.alert("No bindings to remove.");
+        continue;
+      }
+
+      const targetRaw = window.prompt("Binding number or id to remove", String(bindings.length));
+      if (targetRaw === null) {
+        continue;
+      }
+
+      const normalizedTarget = String(targetRaw).trim();
+      if (!normalizedTarget) {
+        continue;
+      }
+
+      let bindingToDelete = bindings.find((binding) => binding.id === normalizedTarget) || null;
+      if (!bindingToDelete) {
+        const parsedIndex = Number.parseInt(normalizedTarget, 10);
+        if (Number.isFinite(parsedIndex) && parsedIndex >= 1 && parsedIndex <= bindings.length) {
+          bindingToDelete = bindings[parsedIndex - 1];
+        }
+      }
+
+      if (!bindingToDelete) {
+        window.alert("Binding not found.");
+        continue;
+      }
+
+      await revokeAclBinding(bindingToDelete.id);
+      continue;
+    }
+
+    window.alert('Unknown command. Use "add", "remove", or "cancel".');
+  }
+
+  await refreshViewerContext();
+  await refreshCapabilitiesForSelection();
+  await syncStateFromServer({ force: true });
+}
+
+async function refreshCapabilitiesForSelection() {
+  if (authMode === "off") {
+    selectedFolderCapabilities = { canRead: true, canWrite: true, canManage: true };
+    activeNoteCapabilities = { canRead: true, canWrite: true, canManage: true };
+    applyAccessUiState();
+    return;
+  }
+
+  try {
+    if (selectedFolderId && selectedFolderId !== ROOT_FOLDER_ID && selectedFolderId !== TRASH_FOLDER_ID) {
+      selectedFolderCapabilities = await fetchCapabilities("folder", selectedFolderId);
+    } else {
+      selectedFolderCapabilities = { ...workspaceCapabilities };
+    }
+  } catch (error) {
+    selectedFolderCapabilities = { canRead: false, canWrite: false, canManage: false };
+    console.error("[tui.notes.2026] failed to refresh folder capabilities", error);
+  }
+
+  const note = getActiveNote();
+  if (!note) {
+    activeNoteCapabilities = { ...selectedFolderCapabilities };
+    applyAccessUiState();
+    return;
+  }
+
+  try {
+    activeNoteCapabilities = await fetchCapabilities("note", note.id);
+  } catch (error) {
+    activeNoteCapabilities = { canRead: false, canWrite: false, canManage: false };
+    console.error("[tui.notes.2026] failed to refresh note capabilities", error);
+  }
+  applyAccessUiState();
+}
+
 function getPayloadRevision(payload) {
   const parsed = Number(payload?._meta?.revision);
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
@@ -1212,6 +1532,9 @@ function commitActiveNoteContentFromEditor() {
   if (!stateReady || ignoreEditorChange) {
     return;
   }
+  if (!hasWritePermissionForActiveNote()) {
+    return;
+  }
 
   const note = getActiveNote();
   if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
@@ -1311,6 +1634,8 @@ function applyRemoteState(payload, { refreshEditor = true, trackAsSynced = true 
   if (refreshEditor && activeContentChanged) {
     syncActiveEditorFromState();
   }
+
+  void refreshCapabilitiesForSelection();
 }
 
 async function persistStateToServer(snapshot) {
@@ -1365,7 +1690,13 @@ async function flushPersistQueue() {
     elements.saveIndicator.textContent = "Saved";
   } catch (error) {
     console.error("[tui.notes.2026] save failed", error);
-    elements.saveIndicator.textContent = "Save failed";
+    if (Number(error?.status) === 401 || Number(error?.status) === 403) {
+      elements.saveIndicator.textContent = "Read-only";
+      await refreshViewerContext().catch(() => {});
+      await refreshCapabilitiesForSelection().catch(() => {});
+    } else {
+      elements.saveIndicator.textContent = "Save failed";
+    }
   } finally {
     persistInFlight = false;
   }
@@ -1374,9 +1705,26 @@ async function flushPersistQueue() {
 async function bootstrapState() {
   elements.saveIndicator.textContent = "Syncing...";
   try {
+    await refreshViewerContext();
+  } catch (error) {
+    console.error("[tui.notes.2026] viewer context bootstrap failed", error);
+  }
+
+  try {
     const remoteState = await apiRequest(STATE_API_ENDPOINT);
     applyRemoteState(remoteState, { refreshEditor: false });
   } catch (error) {
+    if (Number(error?.status) === 401 || Number(error?.status) === 403) {
+      console.error("[tui.notes.2026] access denied while bootstrapping state", error);
+      stateReady = true;
+      applyStatePayload({ folders: [], notes: [], ui: { expandedFolderIds: [] } });
+      renderAll();
+      ensureActiveNote();
+      elements.saveIndicator.textContent = "Access denied";
+      startRemoteEventsStream();
+      return;
+    }
+
     console.error("[tui.notes.2026] bootstrap failed, seeding default state", error);
     const defaultState = createDefaultState();
     applyStatePayload(defaultState);
@@ -1387,7 +1735,12 @@ async function bootstrapState() {
   stateReady = true;
   renderAll();
   ensureActiveNote();
-  elements.saveIndicator.textContent = "Saved";
+  await refreshCapabilitiesForSelection();
+  if (authMode !== "off" && !hasWritePermissionForActiveNote()) {
+    elements.saveIndicator.textContent = "Read-only";
+  } else {
+    elements.saveIndicator.textContent = "Saved";
+  }
   startRemoteSyncLoop();
   startRemoteEventsStream();
 }
@@ -1422,7 +1775,7 @@ function scheduleRemoteEventsReconnect() {
   }, REMOTE_EVENTS_RECONNECT_MS);
 }
 
-function handleRemoteEventPayload(rawData) {
+function handleRemoteEventPayload(rawData, eventName = "") {
   if (typeof rawData !== "string" || !rawData.trim()) {
     return;
   }
@@ -1431,6 +1784,17 @@ function handleRemoteEventPayload(rawData) {
   try {
     payload = JSON.parse(rawData);
   } catch (_error) {
+    return;
+  }
+
+  if (eventName === "permissions-changed") {
+    void refreshViewerContext().catch((error) => {
+      console.error("[tui.notes.2026] failed to refresh viewer context after permission update", error);
+    });
+    void refreshCapabilitiesForSelection().catch((error) => {
+      console.error("[tui.notes.2026] failed to refresh capabilities after permission update", error);
+    });
+    void syncStateFromServer({ force: true });
     return;
   }
 
@@ -1460,10 +1824,13 @@ function startRemoteEventsStream() {
     remoteEventsSource = source;
 
     source.addEventListener("connected", (event) => {
-      handleRemoteEventPayload(event?.data);
+      handleRemoteEventPayload(event?.data, "connected");
     });
     source.addEventListener("state-updated", (event) => {
-      handleRemoteEventPayload(event?.data);
+      handleRemoteEventPayload(event?.data, "state-updated");
+    });
+    source.addEventListener("permissions-changed", (event) => {
+      handleRemoteEventPayload(event?.data, "permissions-changed");
     });
     source.onerror = () => {
       if (remoteEventsSource === source) {
@@ -1515,6 +1882,11 @@ async function syncStateFromServer({ force = false, minRevision = 0 } = {}) {
     }
   } catch (error) {
     console.error("[tui.notes.2026] remote sync failed", error);
+    if (Number(error?.status) === 401 || Number(error?.status) === 403) {
+      elements.saveIndicator.textContent = "Access denied";
+      await refreshViewerContext().catch(() => {});
+      await refreshCapabilitiesForSelection().catch(() => {});
+    }
   } finally {
     remoteSyncInFlight = false;
   }
@@ -2094,12 +2466,14 @@ function renderEditorHeader() {
     elements.noteTitleInput.value = "";
     elements.noteTitleInput.disabled = true;
     titleInputNoteId = null;
+    applyAccessUiState();
     return;
   }
 
   elements.noteTitleInput.disabled = false;
   elements.noteTitleInput.value = note.title;
   titleInputNoteId = note.id;
+  applyAccessUiState();
 }
 
 function clearEditorSelection() {
@@ -2109,6 +2483,7 @@ function clearEditorSelection() {
   resetEditorUndoRedoHistory();
   ignoreEditorChange = false;
   renderEditorHeader();
+  void refreshCapabilitiesForSelection();
 }
 
 function ensureActiveNote() {
@@ -2130,6 +2505,7 @@ function ensureActiveNote() {
     setActiveNote(visibleNotes[0].id);
   } else {
     renderEditorHeader();
+    void refreshCapabilitiesForSelection();
   }
 }
 
@@ -2167,6 +2543,7 @@ function setActiveNote(noteId) {
   }
   renderNotes();
   renderEditorHeader();
+  void refreshCapabilitiesForSelection();
 }
 
 function resetEditorUndoRedoHistory() {
@@ -2211,6 +2588,7 @@ function selectFolder(folderId) {
 
   renderAll();
   ensureActiveNote();
+  void refreshCapabilitiesForSelection();
 }
 
 function hasFolderNameInParent(name, parentId, excludeFolderId = null) {
@@ -2229,6 +2607,10 @@ function getSelectedParentFolderId() {
 
 function createFolder() {
   if (!stateReady) {
+    return;
+  }
+  if (!hasWritePermissionForSelectedFolder()) {
+    window.alert("You do not have permission to create folders here.");
     return;
   }
   const value = window.prompt("Folder name");
@@ -2266,6 +2648,10 @@ function renameFolder(folderId) {
   if (!stateReady) {
     return;
   }
+  if (authMode !== "off" && !selectedFolderCapabilities.canWrite && selectedFolderId === folderId) {
+    window.alert("You do not have permission to rename this folder.");
+    return;
+  }
   const folder = getFolderById(folderId);
   if (!folder) {
     return;
@@ -2295,6 +2681,10 @@ function renameFolder(folderId) {
 
 function deleteFolder(folderId) {
   if (!stateReady) {
+    return;
+  }
+  if (authMode !== "off" && !selectedFolderCapabilities.canWrite && selectedFolderId === folderId) {
+    window.alert("You do not have permission to delete this folder.");
     return;
   }
   const folder = getFolderById(folderId);
@@ -2405,6 +2795,9 @@ function commitActiveNoteTitleFromInput() {
   if (!stateReady) {
     return;
   }
+  if (!hasWritePermissionForActiveNote()) {
+    return;
+  }
 
   const note = getActiveNote();
   if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
@@ -2437,6 +2830,10 @@ function createNote() {
   if (selectedFolderId === TRASH_FOLDER_ID) {
     return;
   }
+  if (!hasWritePermissionForSelectedFolder()) {
+    window.alert("You do not have permission to create notes in this folder.");
+    return;
+  }
   commitActiveNoteTitleFromInput();
   commitActiveNoteContentFromEditor();
 
@@ -2465,6 +2862,10 @@ function renameNote(noteId) {
   if (!stateReady) {
     return;
   }
+  if (!hasWritePermissionForActiveNote() && noteId === activeNoteId) {
+    window.alert("You do not have permission to rename this note.");
+    return;
+  }
   const note = state.notes.find((item) => item.id === noteId);
   if (!note || isNoteInTrash(note)) {
     return;
@@ -2491,6 +2892,10 @@ function moveNoteToTrash(noteId) {
   if (!stateReady) {
     return;
   }
+  if (!hasWritePermissionForActiveNote() && noteId === activeNoteId) {
+    window.alert("You do not have permission to delete this note.");
+    return;
+  }
   const note = state.notes.find((item) => item.id === noteId);
   if (!note) {
     return;
@@ -2506,6 +2911,10 @@ function moveNoteToTrash(noteId) {
 
 function restoreNoteFromTrash(noteId) {
   if (!stateReady) {
+    return;
+  }
+  if (!hasWritePermissionForActiveNote() && noteId === activeNoteId) {
+    window.alert("You do not have permission to restore this note.");
     return;
   }
   const note = state.notes.find((item) => item.id === noteId);
@@ -2524,6 +2933,10 @@ function purgeNote(noteId) {
   if (!stateReady) {
     return;
   }
+  if (!hasWritePermissionForActiveNote() && noteId === activeNoteId) {
+    window.alert("You do not have permission to remove this note.");
+    return;
+  }
   state.notes = state.notes.filter((note) => note.id !== noteId);
   if (activeNoteId === noteId) {
     activeNoteId = null;
@@ -2535,6 +2948,10 @@ function purgeNote(noteId) {
 
 function moveNoteToFolder(noteId, targetFolderId) {
   if (!stateReady) {
+    return;
+  }
+  if (!hasWritePermissionForActiveNote() && noteId === activeNoteId) {
+    window.alert("You do not have permission to move this note.");
     return;
   }
   const note = state.notes.find((item) => item.id === noteId);
@@ -2582,6 +2999,10 @@ function canMoveFolderToParent(folderId, newParentId) {
 
 function moveFolder(folderId, targetParentId) {
   if (!stateReady) {
+    return;
+  }
+  if (authMode !== "off" && !selectedFolderCapabilities.canWrite && selectedFolderId === folderId) {
+    window.alert("You do not have permission to move this folder.");
     return;
   }
   const folder = getFolderById(folderId);
@@ -2723,16 +3144,28 @@ function handleContextAction(action) {
   }
 
   if (contextMenuTarget.type === "folder") {
+    const folder = getFolderById(contextMenuTarget.id);
     if (action === "rename-folder") {
       renameFolder(contextMenuTarget.id);
     }
     if (action === "delete-folder") {
       deleteFolder(contextMenuTarget.id);
     }
+    if (action === "acl-folder") {
+      void manageResourceAccess(
+        "folder",
+        contextMenuTarget.id,
+        folder ? `Folder "${folder.name}"` : `Folder ${contextMenuTarget.id}`,
+      ).catch((error) => {
+        console.error("[tui.notes.2026] failed to manage folder ACL", error);
+        window.alert(error?.message || "Failed to update folder access.");
+      });
+    }
     return;
   }
 
   if (contextMenuTarget.type === "note") {
+    const note = state.notes.find((item) => item.id === contextMenuTarget.id) || null;
     if (action === "rename-note") {
       renameNote(contextMenuTarget.id);
     }
@@ -2744,6 +3177,16 @@ function handleContextAction(action) {
     }
     if (action === "purge-note") {
       purgeNote(contextMenuTarget.id);
+    }
+    if (action === "acl-note") {
+      void manageResourceAccess(
+        "note",
+        contextMenuTarget.id,
+        note ? `Note "${note.title}"` : `Note ${contextMenuTarget.id}`,
+      ).catch((error) => {
+        console.error("[tui.notes.2026] failed to manage note ACL", error);
+        window.alert(error?.message || "Failed to update note access.");
+      });
     }
   }
 }
@@ -2967,11 +3410,15 @@ function wireEvents() {
     }
 
     event.preventDefault();
+    const folderMenuItems = [
+      { label: "Rename", action: "rename-folder" },
+      { label: "Delete", action: "delete-folder", danger: true },
+    ];
+    if (authMode !== "off") {
+      folderMenuItems.push({ label: "Access...", action: "acl-folder" });
+    }
     openContextMenu(
-      [
-        { label: "Rename", action: "rename-folder" },
-        { label: "Delete", action: "delete-folder", danger: true },
-      ],
+      folderMenuItems,
       event.clientX,
       event.clientY,
       { type: "folder", id: folderId },
@@ -2998,23 +3445,26 @@ function wireEvents() {
     event.preventDefault();
 
     if (selectedFolderId === TRASH_FOLDER_ID) {
-      openContextMenu(
-        [
-          { label: "Restore", action: "restore-note" },
-          { label: "Delete Permanently", action: "purge-note", danger: true },
-        ],
-        event.clientX,
-        event.clientY,
-        { type: "note", id: noteId },
-      );
+      const trashItems = [
+        { label: "Restore", action: "restore-note" },
+        { label: "Delete Permanently", action: "purge-note", danger: true },
+      ];
+      if (authMode !== "off") {
+        trashItems.push({ label: "Access...", action: "acl-note" });
+      }
+      openContextMenu(trashItems, event.clientX, event.clientY, { type: "note", id: noteId });
       return;
     }
 
+    const noteItems = [
+      { label: "Rename", action: "rename-note" },
+      { label: "Delete", action: "trash-note", danger: true },
+    ];
+    if (authMode !== "off") {
+      noteItems.push({ label: "Access...", action: "acl-note" });
+    }
     openContextMenu(
-      [
-        { label: "Rename", action: "rename-note" },
-        { label: "Delete", action: "trash-note", danger: true },
-      ],
+      noteItems,
       event.clientX,
       event.clientY,
       { type: "note", id: noteId },
@@ -3057,11 +3507,15 @@ function wireEvents() {
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
+      void refreshViewerContext().catch(() => {});
+      void refreshCapabilitiesForSelection().catch(() => {});
       void syncStateFromServer({ force: true });
     }
   });
 
   window.addEventListener("focus", () => {
+    void refreshViewerContext().catch(() => {});
+    void refreshCapabilitiesForSelection().catch(() => {});
     void syncStateFromServer({ force: true });
   });
 
