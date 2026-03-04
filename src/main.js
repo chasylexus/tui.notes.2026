@@ -303,6 +303,19 @@ function isInlineRecorderSource(value) {
   return /^record:(?:\/\/)?audio(?:\?|$)/i.test(String(value || "").trim());
 }
 
+function encodePathForMarkdown(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    return encodeURI(decodeURI(raw));
+  } catch (_error) {
+    return encodeURI(raw);
+  }
+}
+
 function normalizeInsertedMediaPath(value) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -328,7 +341,7 @@ function normalizeInsertedMediaPath(value) {
   }
 
   if (raw.startsWith("~/") || raw.startsWith("/")) {
-    return raw;
+    return encodePathForMarkdown(raw);
   }
 
   const normalized = raw.replaceAll("\\", "/");
@@ -340,10 +353,39 @@ function normalizeInsertedMediaPath(value) {
     normalized.startsWith("../") ||
     normalized.startsWith("/")
   ) {
-    return normalized;
+    return encodePathForMarkdown(normalized);
   }
 
-  return `./${normalized}`;
+  return encodePathForMarkdown(`./${normalized}`);
+}
+
+function inferRuntimeMediaFileName(mediaPath, mediaKind = "") {
+  const raw = String(mediaPath || "").trim().replaceAll("\\", "/");
+  const kind = mediaKind === "audio" || mediaKind === "video" ? mediaKind : "";
+  const fallback = kind === "audio" ? "audio.m4a" : kind === "video" ? "video.mp4" : "media";
+
+  if (!raw) {
+    return fallback;
+  }
+
+  const withoutQuery = raw.split(/[?#]/, 1)[0] || "";
+  const candidate = withoutQuery.split("/").filter(Boolean).pop() || "";
+  if (!candidate) {
+    return fallback;
+  }
+
+  if (/\.[a-z0-9]+$/i.test(candidate)) {
+    return candidate;
+  }
+
+  if (kind === "audio") {
+    return `${candidate}.m4a`;
+  }
+  if (kind === "video") {
+    return `${candidate}.mp4`;
+  }
+
+  return candidate;
 }
 
 function buildMediaRuntimeUrl(noteId, mediaPath, mediaKind = "") {
@@ -355,6 +397,7 @@ function buildMediaRuntimeUrl(noteId, mediaPath, mediaKind = "") {
     return normalized;
   }
   const kind = mediaKind === "audio" || mediaKind === "video" ? mediaKind : "";
+  const runtimeFileName = encodeURIComponent(inferRuntimeMediaFileName(normalized, kind));
   const query = new URLSearchParams({
     noteId: String(noteId),
     path: normalized,
@@ -362,7 +405,50 @@ function buildMediaRuntimeUrl(noteId, mediaPath, mediaKind = "") {
   if (kind) {
     query.set("kind", kind);
   }
-  return `${MEDIA_FILE_ENDPOINT}?${query.toString()}`;
+  return `${MEDIA_FILE_ENDPOINT}/${runtimeFileName}?${query.toString()}`;
+}
+
+function normalizeRuntimeMediaUrl(urlValue, fallbackNoteId = "") {
+  const raw = String(urlValue || "").trim();
+  if (!raw || !raw.startsWith(MEDIA_FILE_ENDPOINT)) {
+    return raw;
+  }
+
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    if (!parsed.pathname.startsWith(MEDIA_FILE_ENDPOINT)) {
+      return raw;
+    }
+
+    const pathParam = String(parsed.searchParams.get("path") || "").trim();
+    if (!pathParam) {
+      return raw;
+    }
+
+    const noteIdFromQuery = String(parsed.searchParams.get("noteId") || "").trim();
+    const noteId = noteIdFromQuery || String(fallbackNoteId || "").trim();
+    const kindFromQuery = String(parsed.searchParams.get("kind") || "").trim().toLowerCase();
+    const kind = kindFromQuery === "audio" || kindFromQuery === "video" ? kindFromQuery : "";
+
+    return buildMediaRuntimeUrl(noteId || null, pathParam, kind);
+  } catch (_error) {
+    return raw;
+  }
+}
+
+function normalizeRuntimeMediaUrlsInMarkdown(markdown, noteId = "") {
+  const source = String(markdown || "");
+  if (
+    !source ||
+    (!source.includes(`${MEDIA_FILE_ENDPOINT}?`) && !source.includes(`${MEDIA_FILE_ENDPOINT}/`))
+  ) {
+    return source;
+  }
+
+  return source.replace(
+    /\/api\/media\/file(?:\/[^)\s"'<>]*)?\?[^)\s"'<>]+/g,
+    (match) => normalizeRuntimeMediaUrl(match, noteId),
+  );
 }
 
 function readFileAsDataUrl(file) {
@@ -745,6 +831,12 @@ function updateServerRevision(payload) {
 function applyStatePayload(payload) {
   state.folders = Array.isArray(payload?.folders) ? payload.folders : [];
   state.notes = Array.isArray(payload?.notes) ? payload.notes : [];
+  for (const note of state.notes) {
+    if (!note || typeof note !== "object") {
+      continue;
+    }
+    note.content = normalizeRuntimeMediaUrlsInMarkdown(note.content, note.id);
+  }
   state.ui = payload?.ui && typeof payload.ui === "object" ? payload.ui : {};
   ensureValidStateShape();
   purgeExpiredTrash();
@@ -910,8 +1002,9 @@ function commitActiveNoteContentFromEditor() {
     return;
   }
 
-  if (markdown !== note.content) {
-    note.content = markdown;
+  const normalizedMarkdown = normalizeRuntimeMediaUrlsInMarkdown(markdown, note.id);
+  if (normalizedMarkdown !== note.content) {
+    note.content = normalizedMarkdown;
     note.updatedAt = Date.now();
     scheduleSaveIndicator("Saving...");
     renderNotes();
@@ -1449,6 +1542,8 @@ function initEditor() {
         if (
           !normalized ||
           isInlineRecorderSource(normalized) ||
+          normalized.startsWith(`${MEDIA_FILE_ENDPOINT}?`) ||
+          normalized.startsWith(`${MEDIA_FILE_ENDPOINT}/`) ||
           mediaType === "embed" ||
           hasUriScheme(normalized) ||
           isExternalUrl(normalized) ||
@@ -2218,7 +2313,24 @@ function handleEditorChange() {
     return;
   }
 
-  note.content = editor.getMarkdown();
+  let markdown = editor.getMarkdown();
+  const normalizedMarkdown = normalizeRuntimeMediaUrlsInMarkdown(markdown, note.id);
+
+  if (normalizedMarkdown !== markdown && editor.isMarkdownMode()) {
+    ignoreEditorChange = true;
+    try {
+      editor.setMarkdown(normalizedMarkdown, false, false, true);
+    } catch (error) {
+      console.error("[tui.notes.2026] failed to normalize runtime media url", error);
+    } finally {
+      ignoreEditorChange = false;
+    }
+    markdown = normalizedMarkdown;
+  } else {
+    markdown = normalizedMarkdown;
+  }
+
+  note.content = markdown;
   note.updatedAt = Date.now();
   scheduleSaveIndicator("Saving...");
   renderNotes();

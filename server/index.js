@@ -163,6 +163,20 @@ function normalizeUploadFileName(input) {
   return { base, extension: ext };
 }
 
+function normalizeUploadedFileStem(value) {
+  const stem = String(value || "").trim();
+  if (!stem) {
+    return "media";
+  }
+
+  const normalized = stem
+    .replace(/[^\w.-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120);
+
+  return normalized || "media";
+}
+
 function randomSuffix() {
   return crypto.randomBytes(3).toString("hex");
 }
@@ -180,7 +194,8 @@ function saveUploadedMediaFile(note, { kind, originalFileName, mimeType, dataBuf
   const extension = allowedExtensions.has(extFromName)
     ? extFromName
     : inferExtensionFromMime(mimeType, kind);
-  const baseName = rawBase || `${kind}-${Date.now()}`;
+  const safeBase = normalizeUploadedFileStem(rawBase || `${kind}-${Date.now()}`);
+  const baseName = safeBase || `${kind}-${Date.now()}`;
 
   let fileName = `${baseName}.${extension}`;
   let absolutePath = path.join(mediaDir, fileName);
@@ -202,7 +217,13 @@ function saveUploadedMediaFile(note, { kind, originalFileName, mimeType, dataBuf
 }
 
 function resolveRequestedMediaFilePath(note, requestedPath, requestedKind = "") {
-  const raw = String(requestedPath || "").trim().replaceAll("\\", "/");
+  const rawInput = String(requestedPath || "").trim().replaceAll("\\", "/");
+  let raw = rawInput;
+  try {
+    raw = decodeURIComponent(rawInput);
+  } catch (_error) {
+    raw = rawInput;
+  }
   if (!raw) {
     return null;
   }
@@ -286,7 +307,7 @@ app.get("/api/state", (_req, res) => {
   res.json(state);
 });
 
-app.get("/api/media/file", (req, res) => {
+function handleGetMediaFile(req, res) {
   const noteId = String(req.query?.noteId || "").trim();
   const mediaPath = String(req.query?.path || "").trim();
   const requestedKind = String(req.query?.kind || "").trim().toLowerCase();
@@ -319,7 +340,10 @@ app.get("/api/media/file", (req, res) => {
   }
 
   res.sendFile(absolutePath);
-});
+}
+
+app.get("/api/media/file", handleGetMediaFile);
+app.get("/api/media/file/:fileName", handleGetMediaFile);
 
 app.post(
   "/api/media/upload",
