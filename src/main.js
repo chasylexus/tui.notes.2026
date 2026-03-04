@@ -11,7 +11,6 @@ import mermaidPlugin from "@techie_doubts/editor-plugin-mermaid";
 import sequencePlugin from "@techie_doubts/editor-plugin-sequence";
 import tableMergedCell from "@techie_doubts/editor-plugin-table-merged-cell";
 import uml from "@techie_doubts/editor-plugin-uml";
-import DOMPurify from "dompurify";
 import Prism from "prismjs";
 import "./prism-languages.generated.js";
 
@@ -41,7 +40,6 @@ const PANEL_RESIZER_WIDTH = 6;
 const DESKTOP_BREAKPOINT = 860;
 const NOTE_TITLE_SUFFIX_LENGTH = 6;
 const REMOTE_SYNC_INTERVAL_MS = 1500;
-const INLINE_RECORDER_SCHEME = "record://audio";
 const AUDIO_EXTENSIONS = new Set([
   "m4a",
   "mp3",
@@ -63,12 +61,6 @@ const VIDEO_EXTENSIONS = new Set([
   "avi",
   "mkv",
 ]);
-const RECORDING_MIME_CANDIDATES = [
-  "audio/mp4;codecs=mp4a.40.2",
-  "audio/mp4",
-  "audio/webm;codecs=opus",
-  "audio/webm",
-];
 
 const ICONS = {
   folder:
@@ -242,8 +234,6 @@ let titleInputNoteId = null;
 let serverRevision = 0;
 let remoteSyncInFlight = false;
 let remoteSyncTimer = null;
-const mediaInsertState = createMediaInsertState();
-const inlineRecorderSessions = new Map();
 
 ensureValidStateShape();
 initializeExpandedFolders();
@@ -301,116 +291,16 @@ function clampNumber(value, min, max) {
   return Math.min(Math.max(value, min), safeMax);
 }
 
-function createMediaInsertState() {
-  return {
-    recorder: null,
-    stream: null,
-    chunks: [],
-    isUploading: false,
-    closeHookBound: false,
-    discardRecordingOnStop: false,
-  };
-}
-
-function sanitizeMediaLabel(value, fallback = "media") {
-  const trimmed = String(value || "").trim();
-  return trimmed || fallback;
-}
-
-function getLowerFileExtension(value) {
-  const text = String(value || "").trim();
-  if (!text) {
-    return "";
-  }
-
-  const withoutQuery = text.split(/[?#]/, 1)[0] || "";
-  const normalized = withoutQuery.replaceAll("\\", "/");
-  const tail = normalized.split("/").pop() || "";
-  const dotIndex = tail.lastIndexOf(".");
-  if (dotIndex <= 0 || dotIndex === tail.length - 1) {
-    return "";
-  }
-
-  return tail.slice(dotIndex + 1).toLowerCase();
-}
-
-function isAudioReference(value) {
-  return AUDIO_EXTENSIONS.has(getLowerFileExtension(value));
-}
-
-function isVideoFileReference(value) {
-  return VIDEO_EXTENSIONS.has(getLowerFileExtension(value));
-}
-
 function isExternalUrl(value) {
   return /^(https?:)?\/\//i.test(String(value || "").trim());
 }
 
-function parseTimeTokenToSeconds(value) {
-  const text = String(value || "").trim();
-  if (!text) {
-    return null;
-  }
-
-  if (/^\d+$/.test(text)) {
-    return Number(text);
-  }
-
-  const match = text.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/i);
-  if (!match) {
-    return null;
-  }
-
-  const hours = Number(match[1] || 0);
-  const minutes = Number(match[2] || 0);
-  const seconds = Number(match[3] || 0);
-  const total = hours * 3600 + minutes * 60 + seconds;
-  return Number.isFinite(total) && total > 0 ? total : null;
+function hasUriScheme(value) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(String(value || "").trim());
 }
 
-function parseMediaSize(value) {
-  const parsed = Number.parseInt(String(value || "").trim(), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return null;
-  }
-  return parsed;
-}
-
-function extractMediaSizeFromTitle(title) {
-  const raw = String(title || "").trim();
-  if (!raw) {
-    return { width: null, height: null };
-  }
-
-  const match = raw.match(/^=(\d*)x(\d*)$/);
-  if (!match) {
-    return { width: null, height: null };
-  }
-
-  return {
-    width: parseMediaSize(match[1]),
-    height: parseMediaSize(match[2]),
-  };
-}
-
-function createRecorderTokenId() {
-  return `${Date.now().toString(36)}${createRandomToken(8)}`;
-}
-
-function parseInlineRecorderSource(value) {
-  const source = String(value || "").trim();
-  if (!source.toLowerCase().startsWith(INLINE_RECORDER_SCHEME)) {
-    return null;
-  }
-
-  const queryIndex = source.indexOf("?");
-  if (queryIndex < 0) {
-    return { id: "default" };
-  }
-
-  const params = new URLSearchParams(source.slice(queryIndex + 1));
-  const id = String(params.get("id") || "").trim();
-  return { id: id || "default" };
+function isInlineRecorderSource(value) {
+  return /^record:(?:\/\/)?audio(?:\?|$)/i.test(String(value || "").trim());
 }
 
 function normalizeInsertedMediaPath(value) {
@@ -419,7 +309,17 @@ function normalizeInsertedMediaPath(value) {
     return "";
   }
 
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+  if (isInlineRecorderSource(raw)) {
+    if (raw.startsWith("record://")) {
+      return raw;
+    }
+    if (raw.startsWith("record:/")) {
+      return raw.replace(/^record:\//i, "record://");
+    }
+    return raw.replace(/^record:/i, "record://");
+  }
+
+  if (hasUriScheme(raw)) {
     return raw;
   }
 
@@ -463,423 +363,6 @@ function buildMediaRuntimeUrl(noteId, mediaPath, mediaKind = "") {
     query.set("kind", kind);
   }
   return `${MEDIA_FILE_ENDPOINT}?${query.toString()}`;
-}
-
-function parseVideoEmbedUrl(rawValue) {
-  let url;
-  try {
-    url = new URL(String(rawValue || "").trim());
-  } catch (_error) {
-    return null;
-  }
-
-  const host = url.hostname.toLowerCase().replace(/^www\./, "");
-  const pathname = url.pathname || "/";
-
-  if (host === "youtu.be" || host === "youtube.com" || host === "m.youtube.com") {
-    let videoId = "";
-    let startAt = null;
-
-    if (host === "youtu.be") {
-      videoId = pathname.split("/").filter(Boolean)[0] || "";
-      startAt = parseTimeTokenToSeconds(url.searchParams.get("t"));
-    } else if (pathname.startsWith("/watch")) {
-      videoId = url.searchParams.get("v") || "";
-      startAt = parseTimeTokenToSeconds(url.searchParams.get("t"));
-    } else {
-      const parts = pathname.split("/").filter(Boolean);
-      if (parts[0] === "embed" || parts[0] === "shorts" || parts[0] === "live") {
-        videoId = parts[1] || "";
-      }
-      startAt = parseTimeTokenToSeconds(url.searchParams.get("t"));
-    }
-
-    if (!videoId) {
-      return null;
-    }
-
-    const params = new URLSearchParams();
-    if (startAt) {
-      params.set("start", String(startAt));
-    }
-
-    return {
-      provider: "youtube",
-      embedUrl: `https://www.youtube.com/embed/${videoId}${params.toString() ? `?${params}` : ""}`,
-    };
-  }
-
-  if (host === "vimeo.com" || host === "player.vimeo.com") {
-    const match = pathname.match(/\/(?:video\/)?(\d+)/);
-    if (!match) {
-      return null;
-    }
-    return {
-      provider: "vimeo",
-      embedUrl: `https://player.vimeo.com/video/${match[1]}`,
-    };
-  }
-
-  if (host === "rutube.ru") {
-    const match = pathname.match(/\/video\/([a-zA-Z0-9_-]+)/);
-    if (!match) {
-      return null;
-    }
-    return {
-      provider: "rutube",
-      embedUrl: `https://rutube.ru/play/embed/${match[1]}`,
-    };
-  }
-
-  if (host === "dailymotion.com" || host === "dai.ly") {
-    const id =
-      host === "dai.ly"
-        ? pathname.split("/").filter(Boolean)[0] || ""
-        : pathname.match(/\/video\/([a-zA-Z0-9]+)/)?.[1] || "";
-    if (!id) {
-      return null;
-    }
-    return {
-      provider: "dailymotion",
-      embedUrl: `https://www.dailymotion.com/embed/video/${id}`,
-    };
-  }
-
-  return null;
-}
-
-function extractMarkdownNodeText(node) {
-  if (!node || typeof node !== "object") {
-    return "";
-  }
-
-  let text = "";
-
-  if (typeof node.literal === "string") {
-    text += node.literal;
-  }
-
-  if (node.firstChild) {
-    text += extractMarkdownNodeText(node.firstChild);
-  }
-
-  if (node.next) {
-    text += extractMarkdownNodeText(node.next);
-  }
-
-  return text;
-}
-
-function createMediaRenderer() {
-  return {
-    image(node, context) {
-      if (context && context.entering === false) {
-        return [];
-      }
-
-      if (context && typeof context.skipChildren === "function") {
-        context.skipChildren();
-      }
-
-      const destination = String(node?.destination || "").trim();
-      if (!destination) {
-        return context.origin ? context.origin() : null;
-      }
-
-      const alt = sanitizeMediaLabel(extractMarkdownNodeText(node?.firstChild), "media");
-      const recorderMeta = parseInlineRecorderSource(destination);
-      if (recorderMeta) {
-        return [
-          { type: "openTag", tagName: "figure", classNames: ["tn-media", "tn-media-audio-recorder"] },
-          {
-            type: "openTag",
-            tagName: "div",
-            classNames: ["tn-audio-recorder-box"],
-            attributes: {
-              "data-recorder-id": recorderMeta.id,
-              "data-recorder-label": alt,
-            },
-          },
-          {
-            type: "openTag",
-            tagName: "button",
-            classNames: ["tn-audio-recorder-action"],
-            attributes: {
-              type: "button",
-              "data-recorder-action": "start",
-              "data-recorder-id": recorderMeta.id,
-              "data-recorder-label": alt,
-            },
-          },
-          { type: "text", content: "Record audio" },
-          { type: "closeTag", tagName: "button" },
-          {
-            type: "openTag",
-            tagName: "span",
-            classNames: ["tn-audio-recorder-status"],
-            attributes: {
-              "data-recorder-status": recorderMeta.id,
-            },
-          },
-          { type: "text", content: "idle" },
-          { type: "closeTag", tagName: "span" },
-          { type: "closeTag", tagName: "div" },
-          { type: "closeTag", tagName: "figure" },
-        ];
-      }
-
-      const embedVideo = parseVideoEmbedUrl(destination);
-      if (embedVideo) {
-        return [
-          { type: "openTag", tagName: "figure", classNames: ["tn-media", "tn-media-video-host"] },
-          {
-            type: "openTag",
-            tagName: "iframe",
-            attributes: {
-              src: embedVideo.embedUrl,
-              title: alt,
-              loading: "lazy",
-              allow:
-                "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share",
-              allowfullscreen: "",
-            },
-          },
-          { type: "closeTag", tagName: "iframe" },
-          { type: "closeTag", tagName: "figure" },
-        ];
-      }
-
-      const note = getActiveNote();
-      const runtimeSrc = buildMediaRuntimeUrl(note?.id || null, destination, "audio");
-      const mediaSize = extractMediaSizeFromTitle(node?.title);
-
-      if (isAudioReference(destination)) {
-        return [
-          { type: "openTag", tagName: "figure", classNames: ["tn-media", "tn-media-audio"] },
-          {
-            type: "openTag",
-            tagName: "audio",
-            attributes: {
-              controls: "",
-              preload: "metadata",
-              src: runtimeSrc,
-              "data-media-relative-src": destination,
-            },
-          },
-          { type: "closeTag", tagName: "audio" },
-          { type: "closeTag", tagName: "figure" },
-        ];
-      }
-
-      if (isVideoFileReference(destination)) {
-        const runtimeVideoSrc = buildMediaRuntimeUrl(note?.id || null, destination, "video");
-        const videoAttributes = {
-          controls: "",
-          preload: "metadata",
-          playsinline: "",
-          src: runtimeVideoSrc,
-          "data-media-relative-src": destination,
-        };
-
-        if (mediaSize.width) {
-          videoAttributes.width = String(mediaSize.width);
-        }
-        if (mediaSize.height) {
-          videoAttributes.height = String(mediaSize.height);
-        }
-
-        return [
-          { type: "openTag", tagName: "figure", classNames: ["tn-media", "tn-media-video-file"] },
-          {
-            type: "openTag",
-            tagName: "video",
-            attributes: videoAttributes,
-          },
-          { type: "closeTag", tagName: "video" },
-          { type: "closeTag", tagName: "figure" },
-        ];
-      }
-
-      const shouldProxyImage =
-        !isExternalUrl(destination) &&
-        !destination.startsWith("data:") &&
-        !destination.startsWith("blob:");
-
-      if (shouldProxyImage) {
-        const runtimeImageSrc = buildMediaRuntimeUrl(note?.id || null, destination, "image");
-        const imageAttributes = {
-          src: runtimeImageSrc,
-          alt,
-          "data-media-relative-src": destination,
-        };
-
-        if (mediaSize.width) {
-          imageAttributes.width = String(mediaSize.width);
-        }
-        if (mediaSize.height) {
-          imageAttributes.height = String(mediaSize.height);
-        }
-
-        return [
-          { type: "openTag", tagName: "figure", classNames: ["tn-media", "tn-media-image-file"] },
-          {
-            type: "openTag",
-            tagName: "img",
-            selfClose: true,
-            attributes: imageAttributes,
-          },
-          { type: "closeTag", tagName: "figure" },
-        ];
-      }
-
-      return context.origin ? context.origin() : null;
-    },
-  };
-}
-
-function createMediaNodeViewElement(node) {
-  const attrs = node?.attrs || {};
-  const destination = String(attrs.imageUrl || "").trim();
-  const alt = sanitizeMediaLabel(attrs.altText, "media");
-  const note = getActiveNote();
-
-  if (!destination) {
-    const empty = document.createElement("img");
-    empty.alt = alt;
-    return empty;
-  }
-
-  const recorderMeta = parseInlineRecorderSource(destination);
-  if (recorderMeta) {
-    const figure = document.createElement("figure");
-    figure.className = "tn-media tn-media-audio-recorder";
-    const box = document.createElement("div");
-    box.className = "tn-audio-recorder-box";
-    box.dataset.recorderId = recorderMeta.id;
-    box.dataset.recorderLabel = alt;
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "tn-audio-recorder-action";
-    button.dataset.recorderAction = "start";
-    button.dataset.recorderId = recorderMeta.id;
-    button.dataset.recorderLabel = alt;
-    button.textContent = "Record audio";
-
-    const status = document.createElement("span");
-    status.className = "tn-audio-recorder-status";
-    status.dataset.recorderStatus = recorderMeta.id;
-    status.textContent = "idle";
-
-    box.appendChild(button);
-    box.appendChild(status);
-    figure.appendChild(box);
-    return figure;
-  }
-
-  const embedVideo = parseVideoEmbedUrl(destination);
-  if (embedVideo) {
-    const figure = document.createElement("figure");
-    figure.className = "tn-media tn-media-video-host";
-    const iframe = document.createElement("iframe");
-    iframe.src = embedVideo.embedUrl;
-    iframe.title = alt;
-    iframe.loading = "lazy";
-    iframe.allow =
-      "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
-    iframe.allowFullscreen = true;
-    figure.appendChild(iframe);
-    return figure;
-  }
-
-  if (isAudioReference(destination)) {
-    const figure = document.createElement("figure");
-    figure.className = "tn-media tn-media-audio";
-    const audio = document.createElement("audio");
-    audio.controls = true;
-    audio.preload = "metadata";
-    audio.src = buildMediaRuntimeUrl(note?.id || null, destination, "audio");
-    audio.dataset.mediaRelativeSrc = destination;
-    figure.appendChild(audio);
-    return figure;
-  }
-
-  if (isVideoFileReference(destination)) {
-    const figure = document.createElement("figure");
-    figure.className = "tn-media tn-media-video-file";
-    const video = document.createElement("video");
-    video.controls = true;
-    video.preload = "metadata";
-    video.playsInline = true;
-    video.src = buildMediaRuntimeUrl(note?.id || null, destination, "video");
-    video.dataset.mediaRelativeSrc = destination;
-    figure.appendChild(video);
-    return figure;
-  }
-
-  const image = document.createElement("img");
-  image.alt = alt;
-  image.src =
-    !isExternalUrl(destination) && !destination.startsWith("data:") && !destination.startsWith("blob:")
-      ? buildMediaRuntimeUrl(note?.id || null, destination, "image")
-      : destination;
-  image.dataset.mediaRelativeSrc = destination;
-  return image;
-}
-
-function createMediaWysiwygNodeView(node) {
-  const dom = createMediaNodeViewElement(node);
-  return {
-    dom,
-    stopEvent() {
-      return true;
-    },
-  };
-}
-
-function mediaWysiwygNodeViewPlugin() {
-  return {
-    wysiwygNodeViews: {
-      image(node) {
-        return createMediaWysiwygNodeView(node);
-      },
-    },
-  };
-}
-
-function sanitizeRenderedHtml(html) {
-  return DOMPurify.sanitize(String(html || ""), {
-    ADD_TAGS: ["iframe", "audio", "video", "source", "track"],
-    ADD_ATTR: [
-      "allow",
-      "allowfullscreen",
-      "frameborder",
-      "loading",
-      "referrerpolicy",
-      "playsinline",
-      "controls",
-      "preload",
-      "poster",
-      "muted",
-      "loop",
-      "autoplay",
-      "crossorigin",
-    ],
-    ALLOW_DATA_ATTR: true,
-  });
-}
-
-function guessExtensionFromMimeType(mimeType, fallbackKind) {
-  const normalized = String(mimeType || "").toLowerCase();
-  if (normalized.includes("audio/mp4")) return "m4a";
-  if (normalized.includes("audio/mpeg")) return "mp3";
-  if (normalized.includes("audio/wav")) return "wav";
-  if (normalized.includes("audio/ogg")) return "ogg";
-  if (normalized.includes("audio/webm")) return "webm";
-  if (normalized.includes("video/mp4")) return "mp4";
-  if (normalized.includes("video/webm")) return "webm";
-  if (normalized.includes("video/ogg")) return "ogv";
-  return fallbackKind === "audio" ? "m4a" : "mp4";
 }
 
 function readFileAsDataUrl(file) {
@@ -964,226 +447,6 @@ function alertMediaUploadError(error) {
   } catch (_error) {
     // Ignore alert failures in non-browser test environments.
   }
-}
-
-function insertMediaReferenceAtCursor(kind, source, label, options = {}) {
-  const normalizedSource = normalizeInsertedMediaPath(source);
-  if (!normalizedSource) {
-    return false;
-  }
-
-  const altText =
-    sanitizeMediaLabel(
-      label,
-      kind === "audio" ? "audio" : kind === "video" ? "video" : "image",
-    );
-
-  const payload = {
-    imageUrl: normalizedSource,
-    altText,
-  };
-  const canApplySize =
-    kind !== "audio" &&
-    !parseVideoEmbedUrl(normalizedSource) &&
-    !parseInlineRecorderSource(normalizedSource);
-
-  if (canApplySize) {
-    if (Number.isFinite(options.imageWidth) && options.imageWidth > 0) {
-      payload.imageWidth = Math.floor(options.imageWidth);
-    }
-    if (Number.isFinite(options.imageHeight) && options.imageHeight > 0) {
-      payload.imageHeight = Math.floor(options.imageHeight);
-    }
-  }
-
-  editor.exec("addImage", payload);
-
-  scheduleSaveIndicator("Saving...");
-  return true;
-}
-
-function replaceInlineRecorderWithAudioLink(recorderId, relativePath, fallbackLabel = "audio") {
-  if (!recorderId || !relativePath) {
-    return false;
-  }
-
-  const markdown = editor.getMarkdown();
-  const escapedId = String(recorderId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const sourcePattern = `${INLINE_RECORDER_SCHEME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\?id=${escapedId}`;
-  const regex = new RegExp(`!\\[([^\\]]*)\\]\\(${sourcePattern}\\)`);
-  const match = markdown.match(regex);
-  if (!match) {
-    return false;
-  }
-
-  const label = sanitizeMediaLabel(match[1] || fallbackLabel, fallbackLabel);
-  const replacement = `![${label}](${normalizeInsertedMediaPath(relativePath)})`;
-  const nextMarkdown = markdown.replace(regex, replacement);
-
-  if (nextMarkdown === markdown) {
-    return false;
-  }
-
-  ignoreEditorChange = true;
-  try {
-    editor.setMarkdown(nextMarkdown, false, false, true);
-  } finally {
-    ignoreEditorChange = false;
-  }
-  handleEditorChange();
-  return true;
-}
-
-function stopAudioRecordingStream() {
-  if (mediaInsertState.stream) {
-    mediaInsertState.stream.getTracks().forEach((track) => track.stop());
-  }
-  mediaInsertState.stream = null;
-  mediaInsertState.recorder = null;
-  mediaInsertState.chunks = [];
-}
-
-function setInlineRecorderStatus(recorderId, message, isError = false) {
-  if (!recorderId) {
-    return;
-  }
-
-  const statusNodes = document.querySelectorAll(
-    `.tn-audio-recorder-status[data-recorder-status="${selectorEscape(String(recorderId))}"]`,
-  );
-  statusNodes.forEach((node) => {
-    if (!(node instanceof HTMLElement)) {
-      return;
-    }
-    node.textContent = message;
-    node.classList.toggle("is-error", isError);
-  });
-}
-
-function setInlineRecorderButtonState(recorderId, state) {
-  if (!recorderId) {
-    return;
-  }
-  const actionNodes = document.querySelectorAll(
-    `.tn-audio-recorder-action[data-recorder-id="${selectorEscape(String(recorderId))}"]`,
-  );
-  actionNodes.forEach((node) => {
-    if (!(node instanceof HTMLButtonElement)) {
-      return;
-    }
-    const normalizedState = state === "stop" ? "stop" : "start";
-    node.dataset.recorderAction = normalizedState;
-    node.textContent = normalizedState === "stop" ? "Stop & Save" : "Record audio";
-    node.classList.toggle("is-recording", normalizedState === "stop");
-  });
-}
-
-async function startInlineRecorder(recorderId, label) {
-  const normalizedId = String(recorderId || "").trim();
-  if (!normalizedId || inlineRecorderSessions.has(normalizedId)) {
-    return;
-  }
-
-  try {
-    if (
-      !navigator.mediaDevices ||
-      typeof navigator.mediaDevices.getUserMedia !== "function"
-    ) {
-      throw new Error("Audio recording is not supported in this browser.");
-    }
-    if (typeof MediaRecorder === "undefined") {
-      throw new Error("MediaRecorder is not available in this browser.");
-    }
-
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mimeType = RECORDING_MIME_CANDIDATES.find((candidate) => {
-      if (typeof MediaRecorder.isTypeSupported !== "function") {
-        return false;
-      }
-      return MediaRecorder.isTypeSupported(candidate);
-    });
-    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-    const chunks = [];
-    inlineRecorderSessions.set(normalizedId, { recorder, stream, chunks, label: label || "audio" });
-
-    recorder.addEventListener("dataavailable", (event) => {
-      if (event.data && event.data.size > 0) {
-        chunks.push(event.data);
-      }
-    });
-
-    recorder.addEventListener("stop", async () => {
-      const session = inlineRecorderSessions.get(normalizedId);
-      inlineRecorderSessions.delete(normalizedId);
-      stream.getTracks().forEach((track) => track.stop());
-      setInlineRecorderButtonState(normalizedId, "start");
-
-      if (!session || !chunks.length) {
-        setInlineRecorderStatus(normalizedId, "no audio", true);
-        return;
-      }
-
-      try {
-        setInlineRecorderStatus(normalizedId, "uploading...");
-        const recordedType = recorder.mimeType || "audio/webm";
-        const extension = guessExtensionFromMimeType(recordedType, "audio");
-        const fileName = `audio-${Date.now()}.${extension}`;
-        const blob = new Blob(chunks, { type: recordedType });
-        const payload = await uploadMediaBlobForActiveNote(
-          new File([blob], fileName, { type: recordedType }),
-          "audio",
-          fileName,
-        );
-        const replaced = replaceInlineRecorderWithAudioLink(
-          normalizedId,
-          payload?.relativePath || "",
-          session.label || "audio",
-        );
-        setInlineRecorderStatus(normalizedId, replaced ? "saved" : "saved (refresh)");
-      } catch (error) {
-        setInlineRecorderStatus(normalizedId, error?.message || "save failed", true);
-      }
-    });
-
-    recorder.start(250);
-    setInlineRecorderButtonState(normalizedId, "stop");
-    setInlineRecorderStatus(normalizedId, "recording...");
-  } catch (error) {
-    setInlineRecorderStatus(normalizedId, error?.message || "recording failed", true);
-    setInlineRecorderButtonState(normalizedId, "start");
-  }
-}
-
-function stopInlineRecorder(recorderId) {
-  const normalizedId = String(recorderId || "").trim();
-  if (!normalizedId) {
-    return;
-  }
-  const session = inlineRecorderSessions.get(normalizedId);
-  if (!session || session.recorder.state !== "recording") {
-    return;
-  }
-  setInlineRecorderStatus(normalizedId, "processing...");
-  session.recorder.stop();
-}
-
-function stopAllInlineRecorders() {
-  inlineRecorderSessions.forEach((session, recorderId) => {
-    try {
-      if (session.recorder?.state === "recording") {
-        session.recorder.stop();
-      }
-    } catch (_error) {
-      // Ignore recorder stop errors.
-    }
-    try {
-      session.stream?.getTracks()?.forEach((track) => track.stop());
-    } catch (_error) {
-      // Ignore stream stop errors.
-    }
-    setInlineRecorderButtonState(recorderId, "start");
-  });
-  inlineRecorderSessions.clear();
 }
 
 function isDesktopLayout() {
@@ -2142,368 +1405,6 @@ function getActiveNote() {
   return state.notes.find((note) => note.id === activeNoteId) || null;
 }
 
-function createMediaToolbarItem() {
-  const body = createMediaPopupBody();
-
-  return {
-    name: "media",
-    className: "image media-insert",
-    tooltip: "Insert media",
-    popup: {
-      body,
-      className: "tui-notes-media-popup-wrapper",
-      style: { width: "360px" },
-    },
-  };
-}
-
-function createMediaPopupBody() {
-  const root = document.createElement("div");
-  root.className = "tn-media-popup";
-  root.innerHTML = `
-    <div class="tn-media-row">
-      <label class="tn-media-label" for="tn-media-kind">Type</label>
-      <select id="tn-media-kind" class="tn-media-input">
-        <option value="image">Image</option>
-        <option value="audio">Audio</option>
-        <option value="video">Video</option>
-      </select>
-    </div>
-    <div class="tn-media-row">
-      <label class="tn-media-label" for="tn-media-label">Description</label>
-      <input id="tn-media-label" class="tn-media-input" type="text" placeholder="media description" />
-    </div>
-    <div class="tn-media-row tn-media-ref-row">
-      <label class="tn-media-label" for="tn-media-ref">URL or path to file</label>
-      <input
-        id="tn-media-ref"
-        class="tn-media-input"
-        type="text"
-        placeholder="./audio.m4a or https://www.youtube.com/watch?v=..."
-      />
-    </div>
-    <div class="tn-media-size-row">
-      <div class="tn-media-row">
-        <label class="tn-media-label" for="tn-media-width">Width</label>
-        <input id="tn-media-width" class="tn-media-input" type="number" min="1" step="1" placeholder="optional" />
-      </div>
-      <div class="tn-media-row">
-        <label class="tn-media-label" for="tn-media-height">Height</label>
-        <input id="tn-media-height" class="tn-media-input" type="number" min="1" step="1" placeholder="optional" />
-      </div>
-    </div>
-    <div class="tn-media-actions">
-      <button type="button" class="tn-media-btn" data-action="insert-ref">Insert Link</button>
-      <button type="button" class="tn-media-btn" data-action="pick-file">Choose File</button>
-      <input type="file" class="tn-media-file-input" data-role="file-input" />
-    </div>
-    <div class="tn-media-actions" data-role="recorder-insert-row">
-      <button type="button" class="tn-media-btn" data-action="insert-recorder">Insert recorder block</button>
-    </div>
-    <div class="tn-media-record" data-role="record-row">
-      <button type="button" class="tn-media-btn" data-action="start-record">Start recording</button>
-      <button type="button" class="tn-media-btn" data-action="stop-record" disabled>Stop & Insert</button>
-    </div>
-    <div class="tn-media-status" data-role="status"></div>
-  `;
-
-  const kindInput = root.querySelector("#tn-media-kind");
-  const labelInput = root.querySelector("#tn-media-label");
-  const refInput = root.querySelector("#tn-media-ref");
-  const fileInput = root.querySelector('[data-role="file-input"]');
-  const recordRow = root.querySelector('[data-role="record-row"]');
-  const recorderInsertRow = root.querySelector('[data-role="recorder-insert-row"]');
-  const widthInput = root.querySelector("#tn-media-width");
-  const heightInput = root.querySelector("#tn-media-height");
-  const startRecordButton = root.querySelector('[data-action="start-record"]');
-  const stopRecordButton = root.querySelector('[data-action="stop-record"]');
-  const statusEl = root.querySelector('[data-role="status"]');
-
-  if (
-    !(kindInput instanceof HTMLSelectElement) ||
-    !(labelInput instanceof HTMLInputElement) ||
-    !(refInput instanceof HTMLInputElement) ||
-    !(fileInput instanceof HTMLInputElement) ||
-    !(recordRow instanceof HTMLElement) ||
-    !(recorderInsertRow instanceof HTMLElement) ||
-    !(widthInput instanceof HTMLInputElement) ||
-    !(heightInput instanceof HTMLInputElement) ||
-    !(startRecordButton instanceof HTMLButtonElement) ||
-    !(stopRecordButton instanceof HTMLButtonElement) ||
-    !(statusEl instanceof HTMLElement)
-  ) {
-    return root;
-  }
-
-  let selectedKind = "image";
-
-  const setStatus = (message, variant = "muted") => {
-    statusEl.textContent = message;
-    statusEl.dataset.variant = variant;
-  };
-
-  const setUploading = (value) => {
-    mediaInsertState.isUploading = Boolean(value);
-    root.querySelectorAll("button").forEach((button) => {
-      if (!(button instanceof HTMLButtonElement)) {
-        return;
-      }
-      if (button === stopRecordButton && mediaInsertState.recorder?.state === "recording") {
-        button.disabled = false;
-        return;
-      }
-      button.disabled = mediaInsertState.isUploading;
-    });
-    kindInput.disabled = mediaInsertState.isUploading;
-    labelInput.disabled = mediaInsertState.isUploading;
-    refInput.disabled = mediaInsertState.isUploading;
-    widthInput.disabled = mediaInsertState.isUploading;
-    heightInput.disabled = mediaInsertState.isUploading;
-  };
-
-  const readSizePayload = (kind, source) => {
-    const imageWidth = parseMediaSize(widthInput.value);
-    const imageHeight = parseMediaSize(heightInput.value);
-    const canApplySize =
-      kind !== "audio" &&
-      !parseVideoEmbedUrl(source) &&
-      !parseInlineRecorderSource(source);
-
-    if (!canApplySize) {
-      return {};
-    }
-
-    return {
-      imageWidth,
-      imageHeight,
-    };
-  };
-
-  const syncPopupMode = () => {
-    selectedKind = kindInput.value === "audio" || kindInput.value === "video" ? kindInput.value : "image";
-    fileInput.accept =
-      selectedKind === "audio" ? "audio/*" : selectedKind === "video" ? "video/*" : "image/*";
-    recordRow.hidden = selectedKind !== "audio";
-    recorderInsertRow.hidden = selectedKind !== "audio";
-    widthInput.parentElement.hidden = selectedKind === "audio";
-    heightInput.parentElement.hidden = selectedKind === "audio";
-    refInput.placeholder =
-      selectedKind === "video"
-        ? "./clip.mp4 or https://www.youtube.com/watch?v=..."
-        : selectedKind === "audio"
-          ? "./audio.m4a"
-          : "https://example.com/image.png";
-    if (!mediaInsertState.recorder || mediaInsertState.recorder.state !== "recording") {
-      stopRecordButton.disabled = true;
-      startRecordButton.disabled = false;
-    }
-  };
-
-  const closePopup = () => {
-    editor.eventEmitter.emit("closePopup");
-  };
-
-  const insertReference = () => {
-    const reference = refInput.value.trim();
-    if (!reference) {
-      setStatus("Specify link/path first.", "error");
-      return;
-    }
-    const inserted = insertMediaReferenceAtCursor(
-      selectedKind,
-      reference,
-      labelInput.value.trim(),
-      readSizePayload(selectedKind, reference),
-    );
-    if (!inserted) {
-      setStatus("Failed to insert link.", "error");
-      return;
-    }
-    setStatus("Inserted.", "ok");
-    closePopup();
-  };
-
-  const uploadAndInsertFile = async (file) => {
-    if (!(file instanceof File) || file.size <= 0) {
-      setStatus("Choose a file first.", "error");
-      return;
-    }
-
-    try {
-      setUploading(true);
-
-      if (selectedKind === "image") {
-        const dataUrl = await readFileAsDataUrl(file);
-        const inserted = insertMediaReferenceAtCursor(
-          "image",
-          dataUrl,
-          labelInput.value.trim() || file.name,
-          readSizePayload("image", dataUrl),
-        );
-        if (!inserted) {
-          throw new Error("Failed to insert image.");
-        }
-      } else {
-        const payload = await uploadMediaBlobForActiveNote(file, selectedKind, file.name);
-        const inserted = insertMediaReferenceAtCursor(
-          selectedKind,
-          payload?.relativePath || "",
-          labelInput.value.trim() || file.name,
-          readSizePayload(selectedKind, payload?.relativePath || ""),
-        );
-        if (!inserted) {
-          throw new Error("Failed to insert media.");
-        }
-      }
-
-      fileInput.value = "";
-      setStatus("Inserted.", "ok");
-      closePopup();
-    } catch (error) {
-      setStatus(error?.message || "Failed to upload media.", "error");
-    } finally {
-      setUploading(false);
-      syncPopupMode();
-    }
-  };
-
-  const startAudioRecording = async () => {
-    if (selectedKind !== "audio") {
-      return;
-    }
-
-    if (mediaInsertState.recorder?.state === "recording") {
-      return;
-    }
-
-    try {
-      if (
-        !navigator.mediaDevices ||
-        typeof navigator.mediaDevices.getUserMedia !== "function"
-      ) {
-        throw new Error("Audio recording is not supported in this browser.");
-      }
-      if (typeof MediaRecorder === "undefined") {
-        throw new Error("MediaRecorder is not available in this browser.");
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeType = RECORDING_MIME_CANDIDATES.find((candidate) => {
-        if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
-          return false;
-        }
-        return MediaRecorder.isTypeSupported(candidate);
-      });
-
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      mediaInsertState.stream = stream;
-      mediaInsertState.recorder = recorder;
-      mediaInsertState.chunks = [];
-      mediaInsertState.discardRecordingOnStop = false;
-
-      recorder.addEventListener("dataavailable", (event) => {
-        if (event.data && event.data.size > 0) {
-          mediaInsertState.chunks.push(event.data);
-        }
-      });
-
-      recorder.addEventListener("stop", async () => {
-        const chunks = mediaInsertState.chunks.slice();
-        const recordedType = recorder.mimeType || "audio/webm";
-        const shouldDiscard = mediaInsertState.discardRecordingOnStop;
-        mediaInsertState.discardRecordingOnStop = false;
-        stopAudioRecordingStream();
-
-        if (shouldDiscard) {
-          setStatus("", "muted");
-          syncPopupMode();
-          return;
-        }
-
-        if (!chunks.length) {
-          setStatus("Recording is empty.", "error");
-          syncPopupMode();
-          return;
-        }
-
-        const blob = new Blob(chunks, { type: recordedType });
-        const extension = guessExtensionFromMimeType(recordedType, "audio");
-        const fileName = `audio-${Date.now()}.${extension}`;
-        await uploadAndInsertFile(new File([blob], fileName, { type: recordedType }));
-      });
-
-      recorder.start(200);
-      startRecordButton.disabled = true;
-      stopRecordButton.disabled = false;
-      setStatus("Recording...", "recording");
-    } catch (error) {
-      stopAudioRecordingStream();
-      setStatus(error?.message || "Microphone access failed.", "error");
-      syncPopupMode();
-    }
-  };
-
-  const stopAudioRecordingAndInsert = () => {
-    if (!mediaInsertState.recorder || mediaInsertState.recorder.state !== "recording") {
-      return;
-    }
-    mediaInsertState.discardRecordingOnStop = false;
-    setStatus("Processing recording...", "muted");
-    stopRecordButton.disabled = true;
-    mediaInsertState.recorder.stop();
-  };
-
-  const insertRecorderBlock = () => {
-    if (selectedKind !== "audio") {
-      return;
-    }
-    const tokenId = createRecorderTokenId();
-    const label = sanitizeMediaLabel(labelInput.value.trim(), "record audio");
-    const source = `${INLINE_RECORDER_SCHEME}?id=${tokenId}`;
-    const inserted = insertMediaReferenceAtCursor("audio", source, label);
-    if (!inserted) {
-      setStatus("Failed to insert recorder block.", "error");
-      return;
-    }
-    setStatus("Recorder block inserted.", "ok");
-    closePopup();
-  };
-
-  root.querySelector('[data-action="insert-ref"]')?.addEventListener("click", insertReference);
-  root.querySelector('[data-action="pick-file"]')?.addEventListener("click", () => {
-    fileInput.click();
-  });
-  kindInput.addEventListener("change", () => {
-    syncPopupMode();
-    setStatus("", "muted");
-  });
-  fileInput.addEventListener("change", async () => {
-    const file = fileInput.files?.[0];
-    await uploadAndInsertFile(file);
-  });
-  startRecordButton.addEventListener("click", () => {
-    void startAudioRecording();
-  });
-  stopRecordButton.addEventListener("click", stopAudioRecordingAndInsert);
-  root.querySelector('[data-action="insert-recorder"]')?.addEventListener("click", insertRecorderBlock);
-
-  if (!mediaInsertState.closeHookBound) {
-    editor.eventEmitter.listen("closePopup", () => {
-      if (mediaInsertState.recorder?.state === "recording") {
-        mediaInsertState.discardRecordingOnStop = true;
-        mediaInsertState.recorder.stop();
-      } else {
-        stopAudioRecordingStream();
-      }
-    });
-    mediaInsertState.closeHookBound = true;
-  }
-
-  syncPopupMode();
-  setStatus("", "muted");
-  return root;
-}
-
 function initEditor() {
   const media = window.matchMedia("(prefers-color-scheme: dark)");
   const initialTheme =
@@ -2547,7 +1448,9 @@ function initEditor() {
         const normalized = normalizeInsertedMediaPath(source);
         if (
           !normalized ||
+          isInlineRecorderSource(normalized) ||
           mediaType === "embed" ||
+          hasUriScheme(normalized) ||
           isExternalUrl(normalized) ||
           normalized.startsWith("data:") ||
           normalized.startsWith("blob:")
@@ -2578,7 +1481,31 @@ function initEditor() {
       change: handleEditorChange,
     },
   });
+  ensureMediaToolbarButton(editor);
   installThemeControl(editor, media);
+}
+
+function ensureMediaToolbarButton(editorInstance) {
+  const hasMediaButton = () =>
+    Boolean(
+      document.querySelector(
+        '.toastui-editor-toolbar-icons.image, [aria-label="Insert media"], [aria-label="Insert image"]',
+      ),
+    );
+
+  const insertMediaButton = () => {
+    if (hasMediaButton()) {
+      return;
+    }
+    try {
+      editorInstance.insertToolbarItem({ groupIndex: 3, itemIndex: 1 }, "image");
+    } catch (error) {
+      console.error("[tui.notes.2026] failed to insert media toolbar button", error);
+    }
+  };
+
+  insertMediaButton();
+  requestAnimationFrame(insertMediaButton);
 }
 
 function installThemeControl(editorInstance, mediaQuery) {
@@ -3684,32 +2611,6 @@ function wireEvents() {
     }
   });
 
-  app.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-
-    const actionButton = target.closest(".tn-audio-recorder-action");
-    if (!(actionButton instanceof HTMLButtonElement)) {
-      return;
-    }
-
-    const recorderId = actionButton.dataset.recorderId;
-    const action = actionButton.dataset.recorderAction;
-    const label = actionButton.dataset.recorderLabel || "audio";
-
-    if (!recorderId) {
-      return;
-    }
-
-    if (action === "stop") {
-      stopInlineRecorder(recorderId);
-    } else {
-      void startInlineRecorder(recorderId, label);
-    }
-  });
-
   window.addEventListener("resize", () => {
     hideContextMenu();
     applyLayoutPrefs(false);
@@ -3811,24 +2712,7 @@ function wireEvents() {
       clearInterval(remoteSyncTimer);
       remoteSyncTimer = null;
     }
-
-    inlineRecorderSessions.forEach((session) => {
-      try {
-        if (session.recorder?.state === "recording") {
-          session.recorder.stop();
-        }
-      } catch (_error) {
-        // Ignore stop errors during unload.
-      }
-      try {
-        session.stream?.getTracks()?.forEach((track) => track.stop());
-      } catch (_error) {
-        // Ignore stream cleanup errors.
-      }
-    });
-    inlineRecorderSessions.clear();
     stopResize();
-    stopAudioRecordingStream();
     persistLayoutPrefs();
     flushStateWithBeacon();
   });
