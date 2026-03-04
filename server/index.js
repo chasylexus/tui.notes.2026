@@ -27,6 +27,9 @@ const MAX_MEDIA_UPLOAD_BYTES =
 const AUDIO_EXTENSIONS = new Set(["m4a", "mp3", "wav", "ogg", "opus", "webm", "aac", "flac", "oga", "mp4"]);
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "m4v", "ogv", "avi", "mkv"]);
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"]);
+const SSE_KEEPALIVE_MS = 25_000;
+const sseClients = new Set();
+let sseEventId = 0;
 
 function sanitizePathSegment(value) {
   const segment = String(value || "").trim();
@@ -282,6 +285,42 @@ function resolveServeDistMode() {
   return fs.existsSync(DIST_INDEX_FILE);
 }
 
+function writeSseEvent(response, eventName, payload) {
+  const id = String(++sseEventId);
+  response.write(`id: ${id}\n`);
+  response.write(`event: ${eventName}\n`);
+  response.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function broadcastStateRevision(nextState) {
+  if (!nextState || typeof nextState !== "object") {
+    return;
+  }
+
+  const revision = Number(nextState?._meta?.revision);
+  if (!Number.isFinite(revision) || revision < 0) {
+    return;
+  }
+
+  const payload = {
+    revision,
+    updatedAt: Number(nextState?._meta?.updatedAt) || Date.now(),
+  };
+
+  for (const client of sseClients) {
+    try {
+      writeSseEvent(client, "state-updated", payload);
+    } catch (_error) {
+      try {
+        client.end();
+      } catch (_endError) {
+        // Ignore close errors for dead sockets.
+      }
+      sseClients.delete(client);
+    }
+  }
+}
+
 const shouldServeDist = resolveServeDistMode();
 if (shouldServeDist && fs.existsSync(DIST_DIR)) {
   app.use(express.static(DIST_DIR));
@@ -305,6 +344,36 @@ app.get("/api/health", (_req, res) => {
 app.get("/api/state", (_req, res) => {
   const state = getHydratedState();
   res.json(state);
+});
+
+app.get("/api/events", (_req, res) => {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
+  sseClients.add(res);
+
+  writeSseEvent(res, "connected", {
+    revision: Number(getHydratedState()?._meta?.revision) || 0,
+    connectedAt: Date.now(),
+  });
+
+  const keepalive = setInterval(() => {
+    try {
+      res.write(": keepalive\n\n");
+    } catch (_error) {
+      clearInterval(keepalive);
+      sseClients.delete(res);
+    }
+  }, SSE_KEEPALIVE_MS);
+
+  res.on("close", () => {
+    clearInterval(keepalive);
+    sseClients.delete(res);
+  });
 });
 
 function handleGetMediaFile(req, res) {
@@ -415,6 +484,7 @@ function handleStateWrite(req, res) {
 
   try {
     const nextState = replaceState(req.body);
+    broadcastStateRevision(nextState);
     res.json(nextState);
   } catch (error) {
     if (Number(error?.status) === 409) {

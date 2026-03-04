@@ -26,6 +26,7 @@ import "katex/dist/katex.min.css";
 import "./style.css";
 
 const STATE_API_ENDPOINT = "/api/state";
+const EVENTS_API_ENDPOINT = "/api/events";
 const MEDIA_UPLOAD_ENDPOINT = "/api/media/upload";
 const MEDIA_FILE_ENDPOINT = "/api/media/file";
 const THEME_STORAGE_KEY = "themeMode";
@@ -40,6 +41,7 @@ const PANEL_RESIZER_WIDTH = 6;
 const DESKTOP_BREAKPOINT = 860;
 const NOTE_TITLE_SUFFIX_LENGTH = 6;
 const REMOTE_SYNC_INTERVAL_MS = 1500;
+const REMOTE_EVENTS_RECONNECT_MS = 1500;
 const AUDIO_EXTENSIONS = new Set([
   "m4a",
   "mp3",
@@ -234,6 +236,10 @@ let titleInputNoteId = null;
 let serverRevision = 0;
 let remoteSyncInFlight = false;
 let remoteSyncTimer = null;
+let remoteEventsSource = null;
+let remoteEventsReconnectTimer = null;
+let pendingRemoteRevision = 0;
+let lastSyncedSnapshot = null;
 
 ensureValidStateShape();
 initializeExpandedFolders();
@@ -869,6 +875,35 @@ function snapshotStateForPersistence() {
   };
 }
 
+function cloneStateSnapshot(snapshot) {
+  return {
+    folders: Array.isArray(snapshot?.folders)
+      ? snapshot.folders.map((folder) => ({ ...folder }))
+      : [],
+    notes: Array.isArray(snapshot?.notes) ? snapshot.notes.map((note) => ({ ...note })) : [],
+    ui:
+      snapshot?.ui && typeof snapshot.ui === "object"
+        ? {
+          expandedFolderIds: Array.isArray(snapshot.ui.expandedFolderIds)
+            ? [...snapshot.ui.expandedFolderIds]
+            : [],
+        }
+        : { expandedFolderIds: [] },
+  };
+}
+
+function createSnapshotFromPayload(payload) {
+  return cloneStateSnapshot({
+    folders: Array.isArray(payload?.folders) ? payload.folders : [],
+    notes: Array.isArray(payload?.notes) ? payload.notes : [],
+    ui: payload?.ui && typeof payload.ui === "object" ? payload.ui : {},
+  });
+}
+
+function updateLastSyncedSnapshot(payload) {
+  lastSyncedSnapshot = createSnapshotFromPayload(payload);
+}
+
 function getFolderTimestamp(folder) {
   return Number(folder?.updatedAt) || Number(folder?.createdAt) || 0;
 }
@@ -881,7 +916,188 @@ function cloneConflictEntity(entity) {
   return entity && typeof entity === "object" ? { ...entity } : entity;
 }
 
-function mergeConflictPayload(localSnapshot, remotePayload) {
+function mergeScalarConflictValue(baseValue, localValue, remoteValue, { preferLocal }) {
+  if (Object.is(localValue, remoteValue)) {
+    return localValue;
+  }
+  const localChanged = !Object.is(localValue, baseValue);
+  const remoteChanged = !Object.is(remoteValue, baseValue);
+
+  if (localChanged && !remoteChanged) {
+    return localValue;
+  }
+  if (!localChanged && remoteChanged) {
+    return remoteValue;
+  }
+  if (!localChanged && !remoteChanged) {
+    return remoteValue;
+  }
+  return preferLocal ? localValue : remoteValue;
+}
+
+function getSingleReplaceDelta(baseText, nextText) {
+  if (baseText === nextText) {
+    return null;
+  }
+
+  let start = 0;
+  while (
+    start < baseText.length &&
+    start < nextText.length &&
+    baseText.charCodeAt(start) === nextText.charCodeAt(start)
+  ) {
+    start += 1;
+  }
+
+  let endBase = baseText.length;
+  let endNext = nextText.length;
+  while (
+    endBase > start &&
+    endNext > start &&
+    baseText.charCodeAt(endBase - 1) === nextText.charCodeAt(endNext - 1)
+  ) {
+    endBase -= 1;
+    endNext -= 1;
+  }
+
+  return {
+    start,
+    end: endBase,
+    insert: nextText.slice(start, endNext),
+  };
+}
+
+function applySingleReplaceDelta(baseText, delta) {
+  if (!delta) {
+    return baseText;
+  }
+  return `${baseText.slice(0, delta.start)}${delta.insert}${baseText.slice(delta.end)}`;
+}
+
+function tryMergeSingleReplaceDeltas(baseText, localDelta, remoteDelta) {
+  if (!localDelta || !remoteDelta) {
+    return null;
+  }
+
+  const localPureInsert = localDelta.start === localDelta.end;
+  const remotePureInsert = remoteDelta.start === remoteDelta.end;
+  if (
+    localPureInsert &&
+    remotePureInsert &&
+    localDelta.start === remoteDelta.start &&
+    localDelta.insert !== remoteDelta.insert
+  ) {
+    return `${baseText.slice(0, localDelta.start)}${localDelta.insert}${remoteDelta.insert}${baseText.slice(localDelta.end)}`;
+  }
+
+  const localEndsBeforeRemote = localDelta.end <= remoteDelta.start;
+  const remoteEndsBeforeLocal = remoteDelta.end <= localDelta.start;
+  if (!localEndsBeforeRemote && !remoteEndsBeforeLocal) {
+    return null;
+  }
+
+  const ordered = localEndsBeforeRemote
+    ? [
+      { ...localDelta, source: "local" },
+      { ...remoteDelta, source: "remote" },
+    ]
+    : [
+      { ...remoteDelta, source: "remote" },
+      { ...localDelta, source: "local" },
+    ];
+
+  let merged = applySingleReplaceDelta(baseText, ordered[0]);
+  const firstDeltaLength = ordered[0].insert.length - (ordered[0].end - ordered[0].start);
+  const second = {
+    ...ordered[1],
+    start: ordered[1].start + firstDeltaLength,
+    end: ordered[1].end + firstDeltaLength,
+  };
+  merged = applySingleReplaceDelta(merged, second);
+  return merged;
+}
+
+function mergeNoteContent(baseContent, localContent, remoteContent, { preferLocal }) {
+  const baseText = typeof baseContent === "string" ? baseContent : "";
+  const localText = typeof localContent === "string" ? localContent : "";
+  const remoteText = typeof remoteContent === "string" ? remoteContent : "";
+
+  if (localText === remoteText) {
+    return localText;
+  }
+  if (localText === baseText) {
+    return remoteText;
+  }
+  if (remoteText === baseText) {
+    return localText;
+  }
+
+  const localDelta = getSingleReplaceDelta(baseText, localText);
+  const remoteDelta = getSingleReplaceDelta(baseText, remoteText);
+  const merged = tryMergeSingleReplaceDeltas(baseText, localDelta, remoteDelta);
+  if (typeof merged === "string") {
+    return merged;
+  }
+
+  return preferLocal ? localText : remoteText;
+}
+
+function mergeConflictNote(baseNote, localNote, remoteNote) {
+  const localTimestamp = getNoteTimestamp(localNote);
+  const remoteTimestamp = getNoteTimestamp(remoteNote);
+  const preferLocal = localTimestamp >= remoteTimestamp;
+
+  const baseContent = baseNote?.content || "";
+  const baseTitle = baseNote?.title ?? "Untitled";
+  const baseFolderId = baseNote?.folderId ?? null;
+  const baseDeletedAt = baseNote?.deletedAt ?? null;
+  const baseFileName = baseNote?.fileName ?? `${localNote?.id || remoteNote?.id || "note"}.md`;
+
+  const merged = cloneConflictEntity(preferLocal ? localNote : remoteNote) || {};
+  merged.id = String(localNote?.id || remoteNote?.id || merged.id || "");
+  merged.title = mergeScalarConflictValue(
+    baseTitle,
+    localNote?.title ?? "Untitled",
+    remoteNote?.title ?? "Untitled",
+    { preferLocal },
+  );
+  merged.folderId = mergeScalarConflictValue(
+    baseFolderId,
+    localNote?.folderId ?? null,
+    remoteNote?.folderId ?? null,
+    { preferLocal },
+  );
+  merged.deletedAt = mergeScalarConflictValue(
+    baseDeletedAt,
+    localNote?.deletedAt ?? null,
+    remoteNote?.deletedAt ?? null,
+    { preferLocal },
+  );
+  merged.fileName = mergeScalarConflictValue(
+    baseFileName,
+    localNote?.fileName ?? `${merged.id}.md`,
+    remoteNote?.fileName ?? `${merged.id}.md`,
+    { preferLocal },
+  );
+  merged.content = mergeNoteContent(
+    baseContent,
+    localNote?.content || "",
+    remoteNote?.content || "",
+    { preferLocal },
+  );
+  merged.createdAt =
+    Number(localNote?.createdAt) || Number(remoteNote?.createdAt) || Number(baseNote?.createdAt) || Date.now();
+  merged.updatedAt = Math.max(
+    localTimestamp,
+    remoteTimestamp,
+    Number(merged.updatedAt) || 0,
+    merged.content !== (baseNote?.content || "") ? Date.now() : 0,
+  );
+
+  return merged;
+}
+
+function mergeConflictPayload(baseSnapshot, localSnapshot, remotePayload) {
   const remoteState = {
     folders: Array.isArray(remotePayload?.folders) ? remotePayload.folders : [],
     notes: Array.isArray(remotePayload?.notes) ? remotePayload.notes : [],
@@ -915,6 +1131,14 @@ function mergeConflictPayload(localSnapshot, remotePayload) {
   });
   const validFolderIds = new Set(mergedFolders.map((folder) => String(folder.id)));
 
+  const baseNoteById = new Map();
+  for (const note of baseSnapshot?.notes || []) {
+    if (!note?.id) {
+      continue;
+    }
+    baseNoteById.set(String(note.id), cloneConflictEntity(note));
+  }
+
   const noteById = new Map();
   for (const note of remoteState.notes) {
     if (!note?.id) {
@@ -928,9 +1152,13 @@ function mergeConflictPayload(localSnapshot, remotePayload) {
     }
     const noteId = String(note.id);
     const remoteNote = noteById.get(noteId);
-    if (!remoteNote || getNoteTimestamp(note) >= getNoteTimestamp(remoteNote)) {
+    if (!remoteNote) {
       noteById.set(noteId, cloneConflictEntity(note));
+      continue;
     }
+
+    const baseNote = baseNoteById.get(noteId);
+    noteById.set(noteId, mergeConflictNote(baseNote, note, remoteNote));
   }
 
   const mergedNotes = Array.from(noteById.values())
@@ -1047,13 +1275,19 @@ function syncActiveEditorFromState() {
   }
 }
 
-function applyRemoteState(payload, { refreshEditor = true } = {}) {
+function applyRemoteState(payload, { refreshEditor = true, trackAsSynced = true } = {}) {
   const previousActiveNoteId = activeNoteId;
   const previousActiveContent = getActiveNote()?.content || "";
   const preferredFolderId = selectedFolderId;
 
   applyStatePayload(payload);
   updateServerRevision(payload);
+  if (serverRevision >= pendingRemoteRevision) {
+    pendingRemoteRevision = 0;
+  }
+  if (trackAsSynced) {
+    updateLastSyncedSnapshot(payload);
+  }
 
   if (
     preferredFolderId === ROOT_FOLDER_ID ||
@@ -1104,6 +1338,10 @@ async function flushPersistQueue() {
       try {
         const response = await persistStateToServer(snapshot);
         updateServerRevision(response);
+        updateLastSyncedSnapshot(response);
+        if (serverRevision >= pendingRemoteRevision) {
+          pendingRemoteRevision = 0;
+        }
       } catch (error) {
         const isConflict =
           Number(error?.status) === 409 &&
@@ -1115,11 +1353,11 @@ async function flushPersistQueue() {
           throw error;
         }
 
-        const mergedState = mergeConflictPayload(snapshot, error.payload.state);
+        const mergedState = mergeConflictPayload(lastSyncedSnapshot, snapshot, error.payload.state);
         applyRemoteState({
           ...mergedState,
           _meta: error.payload.state?._meta,
-        });
+        }, { trackAsSynced: false });
         persistQueued = true;
       }
     } while (persistQueued);
@@ -1140,7 +1378,9 @@ async function bootstrapState() {
     applyRemoteState(remoteState, { refreshEditor: false });
   } catch (error) {
     console.error("[tui.notes.2026] bootstrap failed, seeding default state", error);
-    applyStatePayload(createDefaultState());
+    const defaultState = createDefaultState();
+    applyStatePayload(defaultState);
+    updateLastSyncedSnapshot(defaultState);
     saveState();
   }
 
@@ -1149,6 +1389,7 @@ async function bootstrapState() {
   ensureActiveNote();
   elements.saveIndicator.textContent = "Saved";
   startRemoteSyncLoop();
+  startRemoteEventsStream();
 }
 
 function startRemoteSyncLoop() {
@@ -1160,7 +1401,83 @@ function startRemoteSyncLoop() {
   }, REMOTE_SYNC_INTERVAL_MS);
 }
 
-async function syncStateFromServer({ force = false } = {}) {
+function stopRemoteEventsStream() {
+  if (remoteEventsReconnectTimer) {
+    clearTimeout(remoteEventsReconnectTimer);
+    remoteEventsReconnectTimer = null;
+  }
+  if (remoteEventsSource) {
+    remoteEventsSource.close();
+    remoteEventsSource = null;
+  }
+}
+
+function scheduleRemoteEventsReconnect() {
+  if (remoteEventsReconnectTimer) {
+    return;
+  }
+  remoteEventsReconnectTimer = window.setTimeout(() => {
+    remoteEventsReconnectTimer = null;
+    startRemoteEventsStream();
+  }, REMOTE_EVENTS_RECONNECT_MS);
+}
+
+function handleRemoteEventPayload(rawData) {
+  if (typeof rawData !== "string" || !rawData.trim()) {
+    return;
+  }
+
+  let payload = null;
+  try {
+    payload = JSON.parse(rawData);
+  } catch (_error) {
+    return;
+  }
+
+  const revision = Number(payload?.revision);
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    return;
+  }
+
+  if (revision <= serverRevision) {
+    return;
+  }
+
+  pendingRemoteRevision = Math.max(pendingRemoteRevision, revision);
+  void syncStateFromServer({ force: true, minRevision: pendingRemoteRevision });
+}
+
+function startRemoteEventsStream() {
+  if (typeof EventSource !== "function") {
+    return;
+  }
+  if (remoteEventsSource) {
+    return;
+  }
+
+  try {
+    const source = new EventSource(EVENTS_API_ENDPOINT);
+    remoteEventsSource = source;
+
+    source.addEventListener("connected", (event) => {
+      handleRemoteEventPayload(event?.data);
+    });
+    source.addEventListener("state-updated", (event) => {
+      handleRemoteEventPayload(event?.data);
+    });
+    source.onerror = () => {
+      if (remoteEventsSource === source) {
+        stopRemoteEventsStream();
+        scheduleRemoteEventsReconnect();
+      }
+    };
+  } catch (error) {
+    console.error("[tui.notes.2026] failed to start SSE stream", error);
+    scheduleRemoteEventsReconnect();
+  }
+}
+
+async function syncStateFromServer({ force = false, minRevision = 0 } = {}) {
   if (!stateReady) {
     return;
   }
@@ -1178,14 +1495,24 @@ async function syncStateFromServer({ force = false } = {}) {
   try {
     const remoteState = await apiRequest(STATE_API_ENDPOINT);
     const remoteRevision = getPayloadRevision(remoteState);
-    if (!force && remoteRevision <= serverRevision) {
+    const requiredRevision = Math.max(
+      Number.isSafeInteger(Number(minRevision)) ? Number(minRevision) : 0,
+      pendingRemoteRevision,
+    );
+    if (remoteRevision <= serverRevision && requiredRevision <= serverRevision) {
       updateServerRevision(remoteState);
+      return;
+    }
+    if (remoteRevision <= serverRevision && requiredRevision > serverRevision) {
       return;
     }
     if (shouldDeferRemoteApply()) {
       return;
     }
     applyRemoteState(remoteState);
+    if (remoteRevision >= pendingRemoteRevision) {
+      pendingRemoteRevision = 0;
+    }
   } catch (error) {
     console.error("[tui.notes.2026] remote sync failed", error);
   } finally {
@@ -2824,6 +3151,7 @@ function wireEvents() {
       clearInterval(remoteSyncTimer);
       remoteSyncTimer = null;
     }
+    stopRemoteEventsStream();
     stopResize();
     persistLayoutPrefs();
     flushStateWithBeacon();
