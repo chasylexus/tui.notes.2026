@@ -47,7 +47,7 @@ services:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.14.0
     environment:
       OAUTH2_PROXY_PROVIDER: keycloak-oidc
-      OAUTH2_PROXY_OIDC_ISSUER_URL: http://keycloak:8080/realms/tui-notes-local
+      OAUTH2_PROXY_OIDC_ISSUER_URL: http://127.0.0.1:18080/realms/tui-notes-local
       OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "true"
       OAUTH2_PROXY_LOGIN_URL: http://127.0.0.1:18080/realms/tui-notes-local/protocol/openid-connect/auth
       OAUTH2_PROXY_REDEEM_URL: http://keycloak:8080/realms/tui-notes-local/protocol/openid-connect/token
