@@ -528,6 +528,111 @@ body.dark.is-resizing .panel-resizer::before {
   color: #b4232c;
 }
 
+.acl-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2400;
+  display: none;
+}
+
+.acl-modal.is-open {
+  display: block;
+}
+
+.acl-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(12, 18, 30, 0.44);
+}
+
+.acl-modal-dialog {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(520px, calc(100vw - 28px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  border: 1px solid #d7deed;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 44px rgba(16, 24, 40, 0.25);
+}
+
+.acl-modal-header {
+  padding: 14px 16px 8px;
+  border-bottom: 1px solid #e5e8f0;
+}
+
+.acl-modal-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.acl-modal-body {
+  padding: 12px 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.acl-resource-label {
+  margin: 0;
+  font-size: 13px;
+  color: #6f7a91;
+}
+
+.acl-field {
+  display: grid;
+  gap: 6px;
+}
+
+.acl-field span {
+  font-size: 12px;
+  color: #5f6a84;
+}
+
+.acl-field input,
+.acl-field select {
+  width: 100%;
+  border: 1px solid #ccd5e7;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: inherit;
+  background: #fff;
+}
+
+.acl-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px 14px;
+  border-top: 1px solid #e5e8f0;
+}
+
+.acl-modal-actions button {
+  border: 1px solid #ccd5e7;
+  border-radius: 8px;
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  background: #f8faff;
+  color: #1b2538;
+}
+
+.acl-modal-actions button:last-child {
+  background: #2f6cf6;
+  border-color: #2f6cf6;
+  color: #fff;
+}
+
+.acl-modal-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 body.dark .panel {
   background: #171a20;
   border-color: #2a3040;
@@ -628,6 +733,41 @@ body.dark .context-menu-item:hover {
 
 body.dark .context-menu-item.danger {
   color: #ff8f8f;
+}
+
+body.dark .acl-modal-dialog {
+  border-color: #34415a;
+  background: #1a1f2a;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+}
+
+body.dark .acl-modal-header,
+body.dark .acl-modal-actions {
+  border-color: #2b364d;
+}
+
+body.dark .acl-resource-label,
+body.dark .acl-field span {
+  color: #98a6c8;
+}
+
+body.dark .acl-field input,
+body.dark .acl-field select {
+  border-color: #3a4763;
+  background: #222a39;
+  color: #dce5fb;
+}
+
+body.dark .acl-modal-actions button {
+  border-color: #3a4763;
+  background: #283247;
+  color: #dce5fb;
+}
+
+body.dark .acl-modal-actions button:last-child {
+  background: #4f8dff;
+  border-color: #4f8dff;
+  color: #08122b;
 }
 
 /* Export/theme split button fallback for JS-only export package */
@@ -800,6 +940,10 @@ body.dark .context-menu-item.danger {
 
 .note-title-input.is-readonly {
   opacity: 0.75;
+}
+
+.toastui-editor-defaultUI.is-readonly .toastui-editor-main .ProseMirror {
+  cursor: default;
 }
 
 @media (max-width: 1100px) {

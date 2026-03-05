@@ -71,6 +71,8 @@ UI support:
 - In auth modes `observe`/`enforce`, right-click folder/note -> `Access...`
 - Supports grants/removals for `user|group|public` with roles `viewer|editor|owner`
 - Access writes are sent through ACL API and applied live through SSE
+- Access management uses a single modal dialog (dropdown-based, no prompt loops)
+- Note context menu includes `Copy Link` (`?note=<id>`); access is still enforced by ACL
 
 Local ACL tests:
 

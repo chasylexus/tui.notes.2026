@@ -31,6 +31,7 @@ const CAPABILITIES_API_ENDPOINT = "/api/me/capabilities";
 const EVENTS_API_ENDPOINT = "/api/events";
 const MEDIA_UPLOAD_ENDPOINT = "/api/media/upload";
 const MEDIA_FILE_ENDPOINT = "/api/media/file";
+const NOTE_LINK_QUERY_PARAM = "note";
 const THEME_STORAGE_KEY = "themeMode";
 const LAYOUT_STORAGE_KEY = "layoutPrefs";
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -186,6 +187,64 @@ app.innerHTML = `
     </div>
   </div>
   <div id="context-menu" class="context-menu" aria-hidden="true"></div>
+  <div id="acl-modal" class="acl-modal" aria-hidden="true">
+    <div class="acl-modal-backdrop" data-action="close-acl-modal"></div>
+    <div class="acl-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="acl-modal-title">
+      <div class="acl-modal-header">
+        <h3 id="acl-modal-title">Access</h3>
+      </div>
+      <div class="acl-modal-body">
+        <p id="acl-resource-label" class="acl-resource-label"></p>
+        <label class="acl-field">
+          <span>Action</span>
+          <select id="acl-action-select">
+            <option value="grant">Grant access</option>
+            <option value="revoke">Revoke access</option>
+          </select>
+        </label>
+
+        <div id="acl-grant-fields">
+          <label class="acl-field">
+            <span>Subject type</span>
+            <select id="acl-subject-type">
+              <option value="user">User</option>
+              <option value="group">Group</option>
+            </select>
+          </label>
+          <label class="acl-field">
+            <span>Subject</span>
+            <input id="acl-subject-id" type="text" placeholder="bob@example.com or group name" />
+          </label>
+          <label class="acl-field">
+            <span>Role</span>
+            <select id="acl-role-select">
+              <option value="viewer">viewer</option>
+              <option value="editor">editor</option>
+              <option value="owner">owner</option>
+            </select>
+          </label>
+          <label class="acl-field">
+            <span>Propagation</span>
+            <select id="acl-inherit-select">
+              <option value="inherit">Apply to nested resources</option>
+              <option value="direct">Only this resource</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="acl-revoke-fields" hidden>
+          <label class="acl-field">
+            <span>Binding</span>
+            <select id="acl-binding-select"></select>
+          </label>
+        </div>
+      </div>
+      <div class="acl-modal-actions">
+        <button id="acl-cancel-btn" type="button">Cancel</button>
+        <button id="acl-apply-btn" type="button">Apply</button>
+      </div>
+    </div>
+  </div>
 `;
 
 const elements = {
@@ -209,6 +268,18 @@ const elements = {
   themeModeControl: document.querySelector("#theme-mode-control"),
   themeModeSelect: document.querySelector("#theme-mode-select"),
   contextMenu: document.querySelector("#context-menu"),
+  aclModal: document.querySelector("#acl-modal"),
+  aclResourceLabel: document.querySelector("#acl-resource-label"),
+  aclActionSelect: document.querySelector("#acl-action-select"),
+  aclGrantFields: document.querySelector("#acl-grant-fields"),
+  aclRevokeFields: document.querySelector("#acl-revoke-fields"),
+  aclSubjectType: document.querySelector("#acl-subject-type"),
+  aclSubjectId: document.querySelector("#acl-subject-id"),
+  aclRoleSelect: document.querySelector("#acl-role-select"),
+  aclInheritSelect: document.querySelector("#acl-inherit-select"),
+  aclBindingSelect: document.querySelector("#acl-binding-select"),
+  aclCancelBtn: document.querySelector("#acl-cancel-btn"),
+  aclApplyBtn: document.querySelector("#acl-apply-btn"),
 };
 
 const state = {
@@ -258,6 +329,9 @@ let activeNoteCapabilities = {
   canWrite: true,
   canManage: true,
 };
+let aclDialogContext = null;
+let aclDialogBindings = [];
+let editorReadOnlyActive = false;
 
 ensureValidStateShape();
 initializeExpandedFolders();
@@ -868,6 +942,70 @@ function hasWritePermissionForActiveNote() {
   return Boolean(activeNoteCapabilities.canWrite);
 }
 
+function getRequestedNoteIdFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    const noteId = String(url.searchParams.get(NOTE_LINK_QUERY_PARAM) || "").trim();
+    return noteId || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function updateNoteLinkInUrl(noteId) {
+  try {
+    const url = new URL(window.location.href);
+    if (noteId) {
+      url.searchParams.set(NOTE_LINK_QUERY_PARAM, String(noteId));
+    } else {
+      url.searchParams.delete(NOTE_LINK_QUERY_PARAM);
+    }
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  } catch (_error) {
+    // Ignore URL rewrite errors.
+  }
+}
+
+function buildShareLinkForNote(noteId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set(NOTE_LINK_QUERY_PARAM, String(noteId));
+  return url.toString();
+}
+
+async function copyShareLinkForNote(noteId) {
+  const shareLink = buildShareLinkForNote(noteId);
+  if (navigator?.clipboard?.writeText) {
+    await navigator.clipboard.writeText(shareLink);
+    return;
+  }
+  window.prompt("Copy note link", shareLink);
+}
+
+function getEditorSurfaceElements() {
+  const root = document.querySelector(".toastui-editor-defaultUI");
+  const markdownTextarea = root?.querySelector(".toastui-editor-md-container .toastui-editor-md-textarea") || null;
+  const wysiwygSurface = root?.querySelector(".toastui-editor-ww-container .ProseMirror") || null;
+  return { root, markdownTextarea, wysiwygSurface };
+}
+
+function applyEditorReadOnlyState(readOnly) {
+  editorReadOnlyActive = Boolean(readOnly);
+  const { root, markdownTextarea, wysiwygSurface } = getEditorSurfaceElements();
+
+  if (root instanceof HTMLElement) {
+    root.classList.toggle("is-readonly", editorReadOnlyActive);
+  }
+
+  if (markdownTextarea instanceof HTMLTextAreaElement) {
+    markdownTextarea.readOnly = editorReadOnlyActive;
+  }
+
+  if (wysiwygSurface instanceof HTMLElement) {
+    wysiwygSurface.setAttribute("contenteditable", editorReadOnlyActive ? "false" : "true");
+  }
+}
+
 function applyAccessUiState() {
   const canWriteFolder = hasWritePermissionForSelectedFolder();
   const canWriteNote = hasWritePermissionForActiveNote();
@@ -884,14 +1022,11 @@ function applyAccessUiState() {
 
   elements.noteTitleInput.readOnly = !editable;
   elements.noteTitleInput.classList.toggle("is-readonly", !editable);
+  applyEditorReadOnlyState(!editable);
 
   const toolbar = document.querySelector(".toastui-editor-toolbar");
   if (toolbar instanceof HTMLElement) {
     toolbar.classList.toggle("is-readonly", !editable);
-  }
-  const editorRoot = document.querySelector(".toastui-editor-defaultUI");
-  if (editorRoot instanceof HTMLElement) {
-    editorRoot.classList.toggle("is-readonly", !editable);
   }
 
   if (authMode !== "off" && !editable) {
@@ -991,7 +1126,44 @@ function formatAclBindingLine(binding, index) {
   return `${index + 1}. ${binding.subjectType}:${binding.subjectId} -> ${binding.role} (${inheritLabel}) [${binding.id}]`;
 }
 
-async function manageResourceAccess(resourceType, resourceExternalId, resourceLabel) {
+function renderAclBindingOptions() {
+  if (!(elements.aclBindingSelect instanceof HTMLSelectElement)) {
+    return;
+  }
+
+  const options = aclDialogBindings.map((binding, index) => {
+    const label = formatAclBindingLine(binding, index);
+    return `<option value="${escapeHtml(binding.id)}">${escapeHtml(label)}</option>`;
+  });
+
+  if (!options.length) {
+    options.push('<option value="">No bindings available</option>');
+  }
+
+  elements.aclBindingSelect.innerHTML = options.join("");
+}
+
+function updateAclDialogSections() {
+  if (!aclDialogContext) {
+    return;
+  }
+
+  const action = String(elements.aclActionSelect?.value || "grant");
+  const revokeMode = action === "revoke";
+  elements.aclGrantFields.hidden = revokeMode;
+  elements.aclRevokeFields.hidden = !revokeMode;
+  elements.aclApplyBtn.textContent = revokeMode ? "Remove" : "Apply";
+  elements.aclApplyBtn.disabled = revokeMode && !aclDialogBindings.length;
+}
+
+function closeAclDialog() {
+  aclDialogContext = null;
+  aclDialogBindings = [];
+  elements.aclModal.setAttribute("aria-hidden", "true");
+  elements.aclModal.classList.remove("is-open");
+}
+
+async function openAclDialog(resourceType, resourceExternalId, resourceLabel) {
   if (authMode === "off") {
     window.alert("Access control is disabled.");
     return;
@@ -1003,108 +1175,75 @@ async function manageResourceAccess(resourceType, resourceExternalId, resourceLa
     return;
   }
 
-  let shouldContinue = true;
-  while (shouldContinue) {
-    const bindings = await fetchAclBindings(resourceType, resourceExternalId);
-    const bindingLines = bindings.length
-      ? bindings.map((binding, index) => formatAclBindingLine(binding, index)).join("\n")
-      : "(no explicit bindings)";
+  aclDialogContext = { resourceType, resourceExternalId, resourceLabel };
+  aclDialogBindings = await fetchAclBindings(resourceType, resourceExternalId);
 
-    const commandRaw = window.prompt(
-      `Access: ${resourceLabel}\n\nCurrent bindings:\n${bindingLines}\n\nCommands:\n- add\n- remove\n- cancel`,
-      "add",
-    );
+  elements.aclResourceLabel.textContent = resourceLabel;
+  elements.aclActionSelect.value = "grant";
+  elements.aclSubjectType.value = "user";
+  elements.aclSubjectId.value = "";
+  elements.aclRoleSelect.value = "viewer";
+  elements.aclInheritSelect.value = resourceType === "note" ? "direct" : "inherit";
+  renderAclBindingOptions();
+  updateAclDialogSections();
 
-    if (commandRaw === null) {
-      break;
-    }
+  elements.aclModal.setAttribute("aria-hidden", "false");
+  elements.aclModal.classList.add("is-open");
+  elements.aclSubjectId.focus();
+}
 
-    const command = String(commandRaw).trim().toLowerCase();
-    if (!command || command === "cancel" || command === "exit") {
-      break;
-    }
-
-    if (command === "add") {
-      const subjectRaw = window.prompt(
-        "Subject (user:<email>, group:<name>, public:*)",
-        "user:bob@example.com",
-      );
-      if (subjectRaw === null) {
-        continue;
-      }
-      const subject = normalizeAclSubjectInput(subjectRaw);
-      if (!subject) {
-        window.alert("Invalid subject format.");
-        continue;
-      }
-
-      const roleRaw = window.prompt("Role (viewer|editor|owner)", "viewer");
-      if (roleRaw === null) {
-        continue;
-      }
-      const role = normalizeAclRoleInput(roleRaw);
-      if (!role) {
-        window.alert("Invalid role.");
-        continue;
-      }
-
-      const inheritDefault = resourceType === "note" ? "no" : "yes";
-      const inheritRaw = window.prompt("Inherit to children? (yes|no)", inheritDefault);
-      if (inheritRaw === null) {
-        continue;
-      }
-      const inherit = !["no", "n", "0", "false"].includes(String(inheritRaw).trim().toLowerCase());
-
-      await grantAclBinding({
-        resourceType,
-        resourceExternalId,
-        subjectType: subject.subjectType,
-        subjectId: subject.subjectId,
-        role,
-        inherit,
-      });
-      continue;
-    }
-
-    if (command === "remove") {
-      if (!bindings.length) {
-        window.alert("No bindings to remove.");
-        continue;
-      }
-
-      const targetRaw = window.prompt("Binding number or id to remove", String(bindings.length));
-      if (targetRaw === null) {
-        continue;
-      }
-
-      const normalizedTarget = String(targetRaw).trim();
-      if (!normalizedTarget) {
-        continue;
-      }
-
-      let bindingToDelete = bindings.find((binding) => binding.id === normalizedTarget) || null;
-      if (!bindingToDelete) {
-        const parsedIndex = Number.parseInt(normalizedTarget, 10);
-        if (Number.isFinite(parsedIndex) && parsedIndex >= 1 && parsedIndex <= bindings.length) {
-          bindingToDelete = bindings[parsedIndex - 1];
-        }
-      }
-
-      if (!bindingToDelete) {
-        window.alert("Binding not found.");
-        continue;
-      }
-
-      await revokeAclBinding(bindingToDelete.id);
-      continue;
-    }
-
-    window.alert('Unknown command. Use "add", "remove", or "cancel".');
+async function applyAclDialog() {
+  if (!aclDialogContext) {
+    return;
   }
 
+  const action = String(elements.aclActionSelect?.value || "grant");
+  if (action === "revoke") {
+    const bindingId = String(elements.aclBindingSelect?.value || "").trim();
+    if (!bindingId) {
+      window.alert("Select a binding to remove.");
+      return;
+    }
+    await revokeAclBinding(bindingId);
+  } else {
+    const subjectType = String(elements.aclSubjectType?.value || "user").trim().toLowerCase();
+    const subjectIdRaw = String(elements.aclSubjectId?.value || "").trim();
+    const role = normalizeAclRoleInput(elements.aclRoleSelect?.value || "");
+    const inherit = String(elements.aclInheritSelect?.value || "inherit") !== "direct";
+
+    if (!["user", "group", "public"].includes(subjectType)) {
+      window.alert("Unsupported subject type.");
+      return;
+    }
+    if (!subjectIdRaw) {
+      window.alert("Subject is required.");
+      return;
+    }
+    if (!role) {
+      window.alert("Role is required.");
+      return;
+    }
+
+    const normalizedSubject = normalizeAclSubjectInput(`${subjectType}:${subjectIdRaw}`);
+    if (!normalizedSubject) {
+      window.alert("Invalid subject.");
+      return;
+    }
+
+    await grantAclBinding({
+      resourceType: aclDialogContext.resourceType,
+      resourceExternalId: aclDialogContext.resourceExternalId,
+      subjectType: normalizedSubject.subjectType,
+      subjectId: normalizedSubject.subjectId,
+      role,
+      inherit,
+    });
+  }
+
+  closeAclDialog();
   await refreshViewerContext();
   await refreshCapabilitiesForSelection();
-  await syncStateFromServer({ force: true });
+  await syncStateFromServer({ force: true, bypassDeferral: true });
 }
 
 async function refreshCapabilitiesForSelection() {
@@ -1528,6 +1667,42 @@ function isEditorFocused() {
   return Boolean(activeElement.closest(".toastui-editor-defaultUI"));
 }
 
+function preventReadOnlyEditorMutation(event) {
+  if (!editorReadOnlyActive) {
+    return;
+  }
+  const target = event.target;
+  if (!(target instanceof Element) || !target.closest(".toastui-editor-defaultUI")) {
+    return;
+  }
+
+  if (event.type === "keydown") {
+    const keyboardEvent = event;
+    if (keyboardEvent.metaKey || keyboardEvent.ctrlKey || keyboardEvent.altKey) {
+      return;
+    }
+
+    const navigationKeys = new Set([
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "PageUp",
+      "PageDown",
+      "Home",
+      "End",
+      "Escape",
+      "Tab",
+    ]);
+    if (navigationKeys.has(keyboardEvent.key)) {
+      return;
+    }
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+}
+
 function commitActiveNoteContentFromEditor() {
   if (!stateReady || ignoreEditorChange) {
     return;
@@ -1735,6 +1910,10 @@ async function bootstrapState() {
   stateReady = true;
   renderAll();
   ensureActiveNote();
+  const requestedNoteId = getRequestedNoteIdFromUrl();
+  if (requestedNoteId) {
+    setActiveNote(requestedNoteId);
+  }
   await refreshCapabilitiesForSelection();
   if (authMode !== "off" && !hasWritePermissionForActiveNote()) {
     elements.saveIndicator.textContent = "Read-only";
@@ -1794,7 +1973,7 @@ function handleRemoteEventPayload(rawData, eventName = "") {
     void refreshCapabilitiesForSelection().catch((error) => {
       console.error("[tui.notes.2026] failed to refresh capabilities after permission update", error);
     });
-    void syncStateFromServer({ force: true });
+    void syncStateFromServer({ force: true, bypassDeferral: true });
     return;
   }
 
@@ -1844,7 +2023,7 @@ function startRemoteEventsStream() {
   }
 }
 
-async function syncStateFromServer({ force = false, minRevision = 0 } = {}) {
+async function syncStateFromServer({ force = false, minRevision = 0, bypassDeferral = false } = {}) {
   if (!stateReady) {
     return;
   }
@@ -1854,7 +2033,7 @@ async function syncStateFromServer({ force = false, minRevision = 0 } = {}) {
   if (!force && document.hidden) {
     return;
   }
-  if (shouldDeferRemoteApply()) {
+  if (!bypassDeferral && shouldDeferRemoteApply()) {
     return;
   }
 
@@ -1873,7 +2052,7 @@ async function syncStateFromServer({ force = false, minRevision = 0 } = {}) {
     if (remoteRevision <= serverRevision && requiredRevision > serverRevision) {
       return;
     }
-    if (shouldDeferRemoteApply()) {
+    if (!bypassDeferral && shouldDeferRemoteApply()) {
       return;
     }
     applyRemoteState(remoteState);
@@ -2277,6 +2456,11 @@ function initEditor() {
   });
   ensureMediaToolbarButton(editor);
   installThemeControl(editor, media);
+  if (typeof editor.on === "function") {
+    editor.on("changeMode", () => {
+      applyAccessUiState();
+    });
+  }
 }
 
 function ensureMediaToolbarButton(editorInstance) {
@@ -2478,6 +2662,7 @@ function renderEditorHeader() {
 
 function clearEditorSelection() {
   activeNoteId = null;
+  updateNoteLinkInUrl(null);
   ignoreEditorChange = true;
   editor.setMarkdown("");
   resetEditorUndoRedoHistory();
@@ -2519,6 +2704,7 @@ function setActiveNote(noteId) {
   }
 
   activeNoteId = note.id;
+  updateNoteLinkInUrl(note.id);
   ignoreEditorChange = true;
   try {
     editor.setMarkdown(note.content || "", false, false, true);
@@ -3152,7 +3338,7 @@ function handleContextAction(action) {
       deleteFolder(contextMenuTarget.id);
     }
     if (action === "acl-folder") {
-      void manageResourceAccess(
+      void openAclDialog(
         "folder",
         contextMenuTarget.id,
         folder ? `Folder "${folder.name}"` : `Folder ${contextMenuTarget.id}`,
@@ -3179,13 +3365,22 @@ function handleContextAction(action) {
       purgeNote(contextMenuTarget.id);
     }
     if (action === "acl-note") {
-      void manageResourceAccess(
+      void openAclDialog(
         "note",
         contextMenuTarget.id,
         note ? `Note "${note.title}"` : `Note ${contextMenuTarget.id}`,
       ).catch((error) => {
         console.error("[tui.notes.2026] failed to manage note ACL", error);
         window.alert(error?.message || "Failed to update note access.");
+      });
+    }
+    if (action === "copy-note-link") {
+      if (!note) {
+        return;
+      }
+      void copyShareLinkForNote(note.id).catch((error) => {
+        console.error("[tui.notes.2026] failed to copy note link", error);
+        window.alert(error?.message || "Failed to copy note link.");
       });
     }
   }
@@ -3318,6 +3513,11 @@ function wireEvents() {
   elements.newFolderBtn.addEventListener("click", createFolder);
   elements.toggleFoldersBtn.addEventListener("click", toggleFoldersPanel);
   elements.newNoteBtn.addEventListener("click", createNote);
+  app.addEventListener("keydown", preventReadOnlyEditorMutation, true);
+  app.addEventListener("beforeinput", preventReadOnlyEditorMutation, true);
+  app.addEventListener("paste", preventReadOnlyEditorMutation, true);
+  app.addEventListener("drop", preventReadOnlyEditorMutation, true);
+  app.addEventListener("cut", preventReadOnlyEditorMutation, true);
 
   elements.foldersResizer.addEventListener("mousedown", (event) => {
     startResize("folders", event);
@@ -3410,10 +3610,16 @@ function wireEvents() {
     }
 
     event.preventDefault();
-    const folderMenuItems = [
-      { label: "Rename", action: "rename-folder" },
-      { label: "Delete", action: "delete-folder", danger: true },
-    ];
+    const canMutateFolder =
+      authMode === "off" ||
+      (folderId === selectedFolderId ? selectedFolderCapabilities.canWrite : workspaceCapabilities.canWrite);
+    const folderMenuItems = [];
+    if (canMutateFolder) {
+      folderMenuItems.push(
+        { label: "Rename", action: "rename-folder" },
+        { label: "Delete", action: "delete-folder", danger: true },
+      );
+    }
     if (authMode !== "off") {
       folderMenuItems.push({ label: "Access...", action: "acl-folder" });
     }
@@ -3445,10 +3651,15 @@ function wireEvents() {
     event.preventDefault();
 
     if (selectedFolderId === TRASH_FOLDER_ID) {
-      const trashItems = [
-        { label: "Restore", action: "restore-note" },
-        { label: "Delete Permanently", action: "purge-note", danger: true },
-      ];
+      const canMutateTrashNote =
+        authMode === "off" || (noteId === activeNoteId ? hasWritePermissionForActiveNote() : selectedFolderCapabilities.canWrite);
+      const trashItems = [];
+      if (canMutateTrashNote) {
+        trashItems.push(
+          { label: "Restore", action: "restore-note" },
+          { label: "Delete Permanently", action: "purge-note", danger: true },
+        );
+      }
       if (authMode !== "off") {
         trashItems.push({ label: "Access...", action: "acl-note" });
       }
@@ -3456,10 +3667,15 @@ function wireEvents() {
       return;
     }
 
-    const noteItems = [
-      { label: "Rename", action: "rename-note" },
-      { label: "Delete", action: "trash-note", danger: true },
-    ];
+    const canMutateNote =
+      authMode === "off" || (noteId === activeNoteId ? hasWritePermissionForActiveNote() : selectedFolderCapabilities.canWrite);
+    const noteItems = [{ label: "Copy Link", action: "copy-note-link" }];
+    if (canMutateNote) {
+      noteItems.push(
+        { label: "Rename", action: "rename-note" },
+        { label: "Delete", action: "trash-note", danger: true },
+      );
+    }
     if (authMode !== "off") {
       noteItems.push({ label: "Access...", action: "acl-note" });
     }
@@ -3486,6 +3702,28 @@ function wireEvents() {
     hideContextMenu();
   });
 
+  elements.aclActionSelect.addEventListener("change", () => {
+    updateAclDialogSections();
+  });
+  elements.aclCancelBtn.addEventListener("click", () => {
+    closeAclDialog();
+  });
+  elements.aclApplyBtn.addEventListener("click", () => {
+    void applyAclDialog().catch((error) => {
+      console.error("[tui.notes.2026] failed to apply ACL update", error);
+      window.alert(error?.message || "Failed to update access.");
+    });
+  });
+  elements.aclModal.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    if (target.closest('[data-action="close-acl-modal"]')) {
+      closeAclDialog();
+    }
+  });
+
   document.addEventListener("click", (event) => {
     const target = event.target;
     if (target instanceof Element && target.closest("#context-menu")) {
@@ -3497,6 +3735,7 @@ function wireEvents() {
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       hideContextMenu();
+      closeAclDialog();
     }
   });
 
@@ -3509,14 +3748,14 @@ function wireEvents() {
     if (!document.hidden) {
       void refreshViewerContext().catch(() => {});
       void refreshCapabilitiesForSelection().catch(() => {});
-      void syncStateFromServer({ force: true });
+      void syncStateFromServer({ force: true, bypassDeferral: true });
     }
   });
 
   window.addEventListener("focus", () => {
     void refreshViewerContext().catch(() => {});
     void refreshCapabilitiesForSelection().catch(() => {});
-    void syncStateFromServer({ force: true });
+    void syncStateFromServer({ force: true, bypassDeferral: true });
   });
 
   elements.folderList.addEventListener("dragstart", (event) => {
