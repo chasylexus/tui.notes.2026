@@ -12,7 +12,7 @@ docker compose up -d
 Wait until all services are healthy/running, then open:
 
 - App (through OAuth2 Proxy): http://127.0.0.1:4180
-- Keycloak Admin: http://127.0.0.1:8080/admin
+- Keycloak Admin: http://127.0.0.1:18080/admin
 
 Keycloak admin credentials:
 

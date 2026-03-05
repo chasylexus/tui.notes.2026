@@ -24,7 +24,7 @@ services:
     volumes:
       - ./keycloak/realm-tui-notes-local.json:/opt/keycloak/data/import/realm-tui-notes-local.json:ro
     ports:
-      - "8080:8080"
+      - "18080:8080"
     depends_on:
       - keycloak-db
 
@@ -49,7 +49,7 @@ services:
       OAUTH2_PROXY_PROVIDER: keycloak-oidc
       OAUTH2_PROXY_OIDC_ISSUER_URL: http://keycloak:8080/realms/tui-notes-local
       OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "true"
-      OAUTH2_PROXY_LOGIN_URL: http://127.0.0.1:8080/realms/tui-notes-local/protocol/openid-connect/auth
+      OAUTH2_PROXY_LOGIN_URL: http://127.0.0.1:18080/realms/tui-notes-local/protocol/openid-connect/auth
       OAUTH2_PROXY_REDEEM_URL: http://keycloak:8080/realms/tui-notes-local/protocol/openid-connect/token
       OAUTH2_PROXY_OIDC_JWKS_URL: http://keycloak:8080/realms/tui-notes-local/protocol/openid-connect/certs
       OAUTH2_PROXY_CLIENT_ID: tui-notes-local-client
