@@ -37,8 +37,13 @@ const AUDIO_EXTENSIONS = new Set(["m4a", "mp3", "wav", "ogg", "opus", "webm", "a
 const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "m4v", "ogv", "avi", "mkv"]);
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"]);
 const SSE_KEEPALIVE_MS = 25_000;
+const PRESENCE_TTL_MS = 12_000;
+const PRESENCE_SWEEP_MS = 4_000;
 const sseClients = new Set();
+const presenceByClientKey = new Map();
 let sseEventId = 0;
+const STATE_CLIENT_ID_HEADER = "x-tui-client-id";
+const DEBUG_SYNC = process.env.TUI_NOTES_DEBUG_SYNC === "1";
 
 function sanitizePathSegment(value) {
   const segment = String(value || "").trim();
@@ -120,11 +125,6 @@ function isAllowedMediaExtension(filePath, requestedKind) {
     return IMAGE_EXTENSIONS.has(ext);
   }
   return AUDIO_EXTENSIONS.has(ext) || VIDEO_EXTENSIONS.has(ext) || IMAGE_EXTENSIONS.has(ext);
-}
-
-function resolveNoteById(noteId) {
-  const state = getHydratedState();
-  return state.notes.find((note) => String(note.id) === String(noteId)) || null;
 }
 
 function getNoteMediaDirectoryAbsolutePath(note) {
@@ -301,6 +301,7 @@ function getRequestAuthContext(req) {
       id: "anonymous",
       userId: "",
       email: "",
+      preferredUsername: "",
       groups: [],
       isAuthenticated: false,
       displayName: "anonymous",
@@ -322,11 +323,32 @@ function ensureAuthOrReject(req, res) {
 }
 
 async function ensureAclStateFromState(fullState, req) {
-  await aclService.syncResourcesFromState(fullState);
+  let nextState = fullState;
+  await aclService.syncResourcesFromState(nextState);
   const context = getRequestAuthContext(req);
   if (context?.isAuthenticated) {
+    const preservedMeta =
+      nextState && typeof nextState === "object" && nextState._meta && typeof nextState._meta === "object"
+        ? { ...nextState._meta }
+        : null;
     await aclService.ensureBootstrapOwner(context.user);
+    const ensuredHome = await aclService.ensureUserHomeFolder(nextState, context.user, {
+      mode: context.mode || getAuthMode(),
+    });
+    nextState = {
+      ...ensuredHome.state,
+      ...(preservedMeta ? { _meta: preservedMeta } : {}),
+    };
+    if (ensuredHome.changed) {
+      nextState = replaceState({
+        ...nextState,
+        _meta: nextState?._meta,
+      });
+      broadcastStateRevision(nextState);
+    }
   }
+  await aclService.syncResourcesFromState(nextState);
+  return nextState;
 }
 
 async function toScopedStateForRequest(fullState, req) {
@@ -347,7 +369,39 @@ function writeSseEvent(response, eventName, payload) {
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
-function broadcastStateRevision(nextState) {
+function closeSseClient(clientEntry) {
+  if (!clientEntry) {
+    return;
+  }
+  const response = clientEntry.response;
+  try {
+    response?.end();
+  } catch (_endError) {
+    // Ignore close errors for dead sockets.
+  }
+  sseClients.delete(clientEntry);
+}
+
+function debugSyncLog(message, extra = null) {
+  if (!DEBUG_SYNC) {
+    return;
+  }
+  if (extra && typeof extra === "object") {
+    console.log("[tui.notes.2026][sync]", message, extra);
+    return;
+  }
+  console.log("[tui.notes.2026][sync]", message);
+}
+
+function resolveStateSourceClientId(req) {
+  const fromHeader = normalizePresenceClientId(req.get(STATE_CLIENT_ID_HEADER));
+  if (fromHeader) {
+    return fromHeader;
+  }
+  return normalizePresenceClientId(req.body?._meta?.clientId);
+}
+
+function broadcastStateRevision(nextState, { sourceClientId = "" } = {}) {
   if (!nextState || typeof nextState !== "object") {
     return;
   }
@@ -360,18 +414,14 @@ function broadcastStateRevision(nextState) {
   const payload = {
     revision,
     updatedAt: Number(nextState?._meta?.updatedAt) || Date.now(),
+    clientId: normalizePresenceClientId(sourceClientId),
   };
 
   for (const client of sseClients) {
     try {
-      writeSseEvent(client, "state-updated", payload);
+      writeSseEvent(client.response, "state-updated", payload);
     } catch (_error) {
-      try {
-        client.end();
-      } catch (_endError) {
-        // Ignore close errors for dead sockets.
-      }
-      sseClients.delete(client);
+      closeSseClient(client);
     }
   }
 }
@@ -384,17 +434,159 @@ function broadcastPermissionsChanged(payload = {}) {
 
   for (const client of sseClients) {
     try {
-      writeSseEvent(client, "permissions-changed", data);
+      writeSseEvent(client.response, "permissions-changed", data);
     } catch (_error) {
-      try {
-        client.end();
-      } catch (_endError) {
-        // Ignore close errors for dead sockets.
-      }
-      sseClients.delete(client);
+      closeSseClient(client);
     }
   }
 }
+
+function normalizePresenceClientId(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value || value.length > 160) {
+    return "";
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(value)) {
+    return "";
+  }
+  return value;
+}
+
+function normalizePresenceMode(rawValue) {
+  const value = String(rawValue || "").trim().toLowerCase();
+  return value === "markdown" ? "markdown" : "wysiwyg";
+}
+
+function normalizePresenceOffset(rawValue) {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
+function getPresenceUserKey(user) {
+  const id = String(user?.id || "").trim();
+  const email = String(user?.email || "").trim().toLowerCase();
+  const userId = String(user?.userId || "").trim();
+  return id || email || userId || "anonymous";
+}
+
+function getPresenceClientKey(user, clientId) {
+  return `${getPresenceUserKey(user)}::${clientId}`;
+}
+
+function listPresenceParticipantsForNote(noteId) {
+  const now = Date.now();
+  const participants = [];
+
+  for (const [entryKey, entry] of presenceByClientKey.entries()) {
+    if (!entry?.noteId) {
+      continue;
+    }
+    if (now - Number(entry.updatedAt || 0) > PRESENCE_TTL_MS) {
+      presenceByClientKey.delete(entryKey);
+      continue;
+    }
+    if (entry.noteId !== noteId) {
+      continue;
+    }
+    participants.push({
+      clientId: entry.clientId,
+      userKey: entry.userKey,
+      displayName: entry.displayName,
+      mode: entry.mode,
+      anchor: entry.anchor,
+      head: entry.head,
+      updatedAt: entry.updatedAt,
+    });
+  }
+
+  return participants.sort((left, right) =>
+    String(left.displayName || left.userKey).localeCompare(
+      String(right.displayName || right.userKey),
+      undefined,
+      { sensitivity: "base" },
+    ));
+}
+
+async function canClientReadPresenceNote(clientEntry, noteId) {
+  if (!noteId) {
+    return true;
+  }
+  const mode = clientEntry?.mode || getAuthMode();
+  if (mode === "off" || mode === "observe") {
+    return true;
+  }
+  try {
+    const capabilities = await aclService.getCapabilitiesForResource(clientEntry.user, {
+      resourceType: "note",
+      resourceExternalId: noteId,
+      mode,
+    });
+    return Boolean(capabilities.canRead);
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function broadcastPresenceForNote(noteId) {
+  const payload = {
+    noteId: noteId || null,
+    participants: noteId ? listPresenceParticipantsForNote(noteId) : [],
+    updatedAt: Date.now(),
+  };
+
+  for (const client of sseClients) {
+    try {
+      if (noteId) {
+        const canRead = await canClientReadPresenceNote(client, noteId);
+        if (!canRead) {
+          continue;
+        }
+      }
+      writeSseEvent(client.response, "presence-updated", payload);
+    } catch (_error) {
+      closeSseClient(client);
+    }
+  }
+}
+
+function removePresenceForClient(user, clientId) {
+  const normalizedClientId = normalizePresenceClientId(clientId);
+  if (!normalizedClientId) {
+    return;
+  }
+  const presenceKey = getPresenceClientKey(user, normalizedClientId);
+  const existing = presenceByClientKey.get(presenceKey);
+  if (!existing) {
+    return;
+  }
+  presenceByClientKey.delete(presenceKey);
+  if (existing.noteId) {
+    void broadcastPresenceForNote(existing.noteId);
+  }
+}
+
+function sweepStalePresenceEntries() {
+  const now = Date.now();
+  const changedNoteIds = new Set();
+  for (const [entryKey, entry] of presenceByClientKey.entries()) {
+    if (now - Number(entry.updatedAt || 0) <= PRESENCE_TTL_MS) {
+      continue;
+    }
+    presenceByClientKey.delete(entryKey);
+    if (entry?.noteId) {
+      changedNoteIds.add(entry.noteId);
+    }
+  }
+  for (const noteId of changedNoteIds) {
+    void broadcastPresenceForNote(noteId);
+  }
+}
+
+const presenceSweepTimer = setInterval(sweepStalePresenceEntries, PRESENCE_SWEEP_MS);
+presenceSweepTimer.unref?.();
 
 const shouldServeDist = resolveServeDistMode();
 if (shouldServeDist && fs.existsSync(DIST_DIR)) {
@@ -420,11 +612,11 @@ app.get("/api/health", (_req, res) => {
 
 app.get("/api/me", requireAuthentication, async (req, res, next) => {
   try {
-    const fullState = getHydratedState();
-    await ensureAclStateFromState(fullState, req);
+    const fullState = await ensureAclStateFromState(getHydratedState(), req);
     const context = getRequestAuthContext(req);
     const viewerContext = await aclService.getViewerContext(context.user, {
       mode: context.mode,
+      state: fullState,
     });
     res.json(viewerContext);
   } catch (error) {
@@ -440,8 +632,7 @@ app.get("/api/me/capabilities", requireAuthentication, async (req, res, next) =>
       ? { type: resourceTypeRaw, externalId: resourceExternalIdRaw }
       : getWorkspaceResource();
 
-    const fullState = getHydratedState();
-    await ensureAclStateFromState(fullState, req);
+    await ensureAclStateFromState(getHydratedState(), req);
 
     const context = getRequestAuthContext(req);
     const capabilities = await aclService.getCapabilitiesForResource(context.user, {
@@ -467,8 +658,7 @@ app.get("/api/state", requireAuthentication, async (req, res, next) => {
       return;
     }
 
-    const fullState = getHydratedState();
-    await ensureAclStateFromState(fullState, req);
+    const fullState = await ensureAclStateFromState(getHydratedState(), req);
     const scopedState = await toScopedStateForRequest(fullState, req);
     res.json(scopedState);
   } catch (error) {
@@ -485,25 +675,46 @@ app.get("/api/acl/resource/:resourceType/:resourceExternalId", requireAuthentica
 
     const resourceType = String(req.params?.resourceType || "").trim();
     const resourceExternalId = String(req.params?.resourceExternalId || "").trim();
+    const effectiveRaw = String(req.query?.effective || "").trim().toLowerCase();
+    const includeEffective = effectiveRaw === "1" || effectiveRaw === "true" || effectiveRaw === "yes";
     if (!resourceType || !resourceExternalId) {
       res.status(400).json({ message: "resourceType and resourceExternalId are required." });
       return;
     }
 
-    const fullState = getHydratedState();
-    await ensureAclStateFromState(fullState, req);
-
-    const bindings = await aclService.listBindingsForResource({
-      actorUser: context.user,
-      resourceType,
-      resourceExternalId,
-      mode: context.mode,
-    });
+    await ensureAclStateFromState(getHydratedState(), req);
+    let bindings = [];
+    let effectiveBindings = [];
+    if (includeEffective) {
+      const result = await aclService.listEffectiveBindingsForResource({
+        actorUser: context.user,
+        resourceType,
+        resourceExternalId,
+        mode: context.mode,
+      });
+      bindings = result.directBindings;
+      effectiveBindings = result.effectiveBindings;
+    } else {
+      bindings = await aclService.listBindingsForResource({
+        actorUser: context.user,
+        resourceType,
+        resourceExternalId,
+        mode: context.mode,
+      });
+      effectiveBindings = bindings.map((binding) => ({
+        ...binding,
+        relation: "direct",
+        sourceResourceType: resourceType,
+        sourceResourceExternalId: resourceExternalId,
+        canRevoke: true,
+      }));
+    }
 
     res.json({
       resourceType,
       resourceExternalId,
       bindings,
+      effectiveBindings,
     });
   } catch (error) {
     next(error);
@@ -521,8 +732,7 @@ app.post("/api/acl/grant", requireAuthentication, async (req, res, next) => {
       return;
     }
 
-    const fullState = getHydratedState();
-    await ensureAclStateFromState(fullState, req);
+    await ensureAclStateFromState(getHydratedState(), req);
 
     const binding = await aclService.grantBinding({
       actorUser: context.user,
@@ -554,8 +764,7 @@ app.delete("/api/acl/grant/:bindingId", requireAuthentication, async (req, res, 
       return;
     }
 
-    const fullState = getHydratedState();
-    await ensureAclStateFromState(fullState, req);
+    await ensureAclStateFromState(getHydratedState(), req);
 
     const deleted = await aclService.revokeBinding({
       actorUser: context.user,
@@ -583,8 +792,7 @@ app.get("/api/events", requireAuthentication, async (req, res, next) => {
       return;
     }
 
-    const fullState = getHydratedState();
-    await ensureAclStateFromState(fullState, req);
+    const fullState = await ensureAclStateFromState(getHydratedState(), req);
     const scopedState = await toScopedStateForRequest(fullState, req);
 
     res.status(200);
@@ -594,7 +802,15 @@ app.get("/api/events", requireAuthentication, async (req, res, next) => {
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders?.();
 
-    sseClients.add(res);
+    const eventsClientId = normalizePresenceClientId(req.query?.clientId);
+    const clientEntry = {
+      response: res,
+      user: context.user,
+      mode: context.mode,
+      clientId: eventsClientId || "",
+    };
+
+    sseClients.add(clientEntry);
 
     writeSseEvent(res, "connected", {
       revision: Number(scopedState?._meta?.revision) || 0,
@@ -608,13 +824,92 @@ app.get("/api/events", requireAuthentication, async (req, res, next) => {
         res.write(": keepalive\n\n");
       } catch (_error) {
         clearInterval(keepalive);
-        sseClients.delete(res);
+        closeSseClient(clientEntry);
       }
     }, SSE_KEEPALIVE_MS);
 
     res.on("close", () => {
       clearInterval(keepalive);
-      sseClients.delete(res);
+      sseClients.delete(clientEntry);
+      if (eventsClientId) {
+        removePresenceForClient(context.user, eventsClientId);
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/presence/heartbeat", requireAuthentication, async (req, res, next) => {
+  try {
+    const context = ensureAuthOrReject(req, res);
+    if (!context) {
+      return;
+    }
+    if (!req.body || typeof req.body !== "object") {
+      res.status(400).json({ message: "Request body must be an object." });
+      return;
+    }
+
+    const clientId = normalizePresenceClientId(req.body.clientId);
+    if (!clientId) {
+      res.status(400).json({ message: "clientId is required." });
+      return;
+    }
+
+    const mode = normalizePresenceMode(req.body.mode);
+    const noteId = String(req.body.noteId || "").trim() || null;
+    const anchor = normalizePresenceOffset(req.body.anchor);
+    const head = normalizePresenceOffset(req.body.head);
+
+    const fullState = await ensureAclStateFromState(getHydratedState(), req);
+    const previousKey = getPresenceClientKey(context.user, clientId);
+    const previous = presenceByClientKey.get(previousKey) || null;
+
+    if (!noteId) {
+      presenceByClientKey.delete(previousKey);
+      if (previous?.noteId) {
+        void broadcastPresenceForNote(previous.noteId);
+      }
+      res.json({ ok: true, noteId: null, participants: [] });
+      return;
+    }
+
+    const note = Array.isArray(fullState?.notes)
+      ? fullState.notes.find((item) => String(item.id) === noteId && !item.deletedAt)
+      : null;
+    if (!note) {
+      res.status(404).json({ message: "Note not found." });
+      return;
+    }
+
+    await aclService.assertAllowed(context.user, {
+      action: "read",
+      resourceType: "note",
+      resourceExternalId: noteId,
+      mode: context.mode,
+    });
+
+    presenceByClientKey.set(previousKey, {
+      clientId,
+      userKey: getPresenceUserKey(context.user),
+      displayName: context.user?.displayName || context.user?.email || context.user?.userId || context.user?.id || "anonymous",
+      noteId,
+      mode,
+      anchor,
+      head,
+      updatedAt: Date.now(),
+    });
+
+    if (previous?.noteId && previous.noteId !== noteId) {
+      void broadcastPresenceForNote(previous.noteId);
+    }
+    void broadcastPresenceForNote(noteId);
+
+    res.json({
+      ok: true,
+      noteId,
+      participants: listPresenceParticipantsForNote(noteId),
     });
   } catch (error) {
     next(error);
@@ -630,7 +925,10 @@ async function handleGetMediaFile(req, res) {
     return;
   }
 
-  const note = resolveNoteById(noteId);
+  const fullState = await ensureAclStateFromState(getHydratedState(), req);
+  const note = Array.isArray(fullState?.notes)
+    ? fullState.notes.find((item) => String(item.id) === noteId)
+    : null;
   if (!note || note.deletedAt) {
     res.status(404).json({ message: "Note not found." });
     return;
@@ -640,8 +938,6 @@ async function handleGetMediaFile(req, res) {
   if (!context) {
     return;
   }
-  const fullState = getHydratedState();
-  await ensureAclStateFromState(fullState, req);
   await aclService.assertAllowed(context.user, {
     action: "read",
     resourceType: "note",
@@ -701,7 +997,10 @@ app.post(
       return;
     }
 
-    const note = resolveNoteById(noteId);
+    const fullState = await ensureAclStateFromState(getHydratedState(), req);
+    const note = Array.isArray(fullState?.notes)
+      ? fullState.notes.find((item) => String(item.id) === noteId)
+      : null;
     if (!note || note.deletedAt) {
       res.status(404).json({ message: "Note not found." });
       return;
@@ -711,8 +1010,6 @@ app.post(
     if (!context) {
       return;
     }
-    const fullState = getHydratedState();
-    await ensureAclStateFromState(fullState, req);
     await aclService.assertAllowed(context.user, {
       action: "write",
       resourceType: "note",
@@ -768,8 +1065,14 @@ async function handleStateWrite(req, res, next) {
       return;
     }
 
-    const currentFullState = getHydratedState();
-    await ensureAclStateFromState(currentFullState, req);
+    const currentFullState = await ensureAclStateFromState(getHydratedState(), req);
+    const sourceClientId = resolveStateSourceClientId(req);
+    debugSyncLog("state write:request", {
+      user: context.user?.displayName || context.user?.id || "anonymous",
+      baseRevision: Number(req.body?._meta?.baseRevision) || 0,
+      currentRevision: Number(currentFullState?._meta?.revision) || 0,
+      sourceClientId,
+    });
 
     const mergedState = await aclService.mergeScopedStateForWrite({
       currentFullState,
@@ -783,11 +1086,19 @@ async function handleStateWrite(req, res, next) {
       _meta: req.body?._meta,
     });
 
-    await ensureAclStateFromState(nextState, req);
-    broadcastStateRevision(nextState);
-    const scopedState = await toScopedStateForRequest(nextState, req);
+    const ensuredNextState = await ensureAclStateFromState(nextState, req);
+    broadcastStateRevision(ensuredNextState, { sourceClientId });
+    debugSyncLog("state write:applied", {
+      sourceClientId,
+      nextRevision: Number(ensuredNextState?._meta?.revision) || 0,
+    });
+    const scopedState = await toScopedStateForRequest(ensuredNextState, req);
     res.json(scopedState);
   } catch (error) {
+    debugSyncLog("state write:error", {
+      status: Number(error?.status) || 0,
+      message: error?.message || "unknown",
+    });
     if (Number(error?.status) === 409) {
       let scopedConflictState = error?.payload?.state || null;
       if (scopedConflictState && typeof scopedConflictState === "object") {

@@ -121,6 +121,15 @@ function createId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function createShareId() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+function normalizeShareId(value) {
+  const shareId = String(value || "").trim();
+  return shareId || createShareId();
+}
+
 function defaultNoteContent(title) {
   const normalized = String(title || "Untitled").trim() || "Untitled";
   return `# ${normalized}\n`;
@@ -355,6 +364,7 @@ function createDefaultStatePayload() {
     notes: [
       {
         id: noteId,
+        shareId: createShareId(),
         title: "Welcome",
         folderId: null,
         fileName: `${noteId}.md`,
@@ -519,6 +529,7 @@ function importMarkdownNotesFromDisk(state) {
 
     state.notes.push({
       id: tempId,
+      shareId: createShareId(),
       title: deriveTitleFromFileName(relativePath),
       folderId,
       fileName: relativePath,
@@ -631,6 +642,7 @@ function normalizeStatePayload(rawPayload) {
 
     normalizedNotes.push({
       id,
+      shareId: normalizeShareId(rawNote.shareId),
       title,
       folderId,
       fileName,

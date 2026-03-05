@@ -44,12 +44,18 @@ function getIdentityFromHeaders(req) {
     readHeader(req, ["x-auth-request-user", "x-forwarded-user", "x-user-id", "x-user"]) || "";
   const email =
     readHeader(req, ["x-auth-request-email", "x-forwarded-email", "x-user-email", "x-email"]) || "";
+  const preferredUsername =
+    readHeader(
+      req,
+      ["x-auth-request-preferred-username", "x-preferred-username", "x-user-name", "x-username"],
+    ) || "";
   const groupsRaw =
     readHeader(req, ["x-auth-request-groups", "x-forwarded-groups", "x-user-groups", "x-groups"]) || "";
 
   return {
     userId,
     email,
+    preferredUsername,
     groups: parseGroups(groupsRaw),
   };
 }
@@ -57,18 +63,27 @@ function getIdentityFromHeaders(req) {
 function normalizeIdentity(identity) {
   const userId = String(identity?.userId || "").trim();
   const email = String(identity?.email || "").trim().toLowerCase();
+  const preferredUsername = String(identity?.preferredUsername || "").trim();
   const groups = parseGroups(identity?.groups);
+  const emailLocalPart = email.includes("@") ? email.split("@")[0].trim() : email;
 
-  const isAuthenticated = Boolean(userId || email);
-  const stableId = userId || email || "anonymous";
+  const isAuthenticated = Boolean(userId || email || preferredUsername);
+  const stableId = email || preferredUsername || userId || "anonymous";
+  const displayName =
+    preferredUsername ||
+    emailLocalPart ||
+    userId ||
+    stableId ||
+    "anonymous";
 
   return {
     id: stableId,
     userId,
     email,
+    preferredUsername,
     groups,
     isAuthenticated,
-    displayName: userId || email || "anonymous",
+    displayName,
   };
 }
 

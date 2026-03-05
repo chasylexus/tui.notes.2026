@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { createBindingInput } from "./acl-store.js";
 
 const WORKSPACE_TYPE = "workspace";
@@ -14,6 +15,9 @@ const ACTION_LEVEL = {
   write: ROLE_LEVEL.editor,
   manage: ROLE_LEVEL.owner,
 };
+
+const HOME_FOLDER_NAME = "Home";
+const HOME_FOLDER_ID_PREFIX = "home-";
 
 function nowMs() {
   return Date.now();
@@ -46,6 +50,7 @@ function normalizeStatePayload(rawState) {
           folderId: folderId && folderIds.has(folderId) ? folderId : null,
           content: typeof note.content === "string" ? note.content : "",
           fileName: typeof note.fileName === "string" ? note.fileName : `${String(note.id)}.md`,
+          shareId: typeof note.shareId === "string" ? note.shareId.trim() || null : null,
           createdAt: Number(note.createdAt) || nowMs(),
           updatedAt: Number(note.updatedAt) || Number(note.createdAt) || nowMs(),
           deletedAt: note.deletedAt ? Number(note.deletedAt) || null : null,
@@ -88,24 +93,98 @@ function toOwnerSubject(subjectType, subjectId) {
   return `${subjectType}:${subjectId}`;
 }
 
-function getUserSubjectIds(user) {
-  const ids = new Set();
+function listUserSubjectCandidates(user) {
+  const candidates = [];
+  const seen = new Set();
 
   const userId = String(user?.userId || "").trim();
   const email = String(user?.email || "").trim().toLowerCase();
+  const preferredUsername = String(user?.preferredUsername || "").trim();
   const id = String(user?.id || "").trim();
 
-  if (userId) {
-    ids.add(userId);
-    ids.add(`user:${userId}`);
+  const push = (subjectId) => {
+    const normalized = String(subjectId || "").trim();
+    if (!normalized || seen.has(normalized) || normalized === "anonymous") {
+      return;
+    }
+    seen.add(normalized);
+    candidates.push({
+      subjectType: "user",
+      subjectId: normalized,
+    });
+  };
+
+  push(email);
+  push(preferredUsername);
+  push(userId);
+  push(id);
+
+  return candidates;
+}
+
+function buildHomeFolderIdForSubject(subjectType, subjectId) {
+  const seed = `${String(subjectType)}:${String(subjectId)}`;
+  const digest = crypto
+    .createHash("sha256")
+    .update(seed)
+    .digest("hex");
+  return `${HOME_FOLDER_ID_PREFIX}${digest.slice(0, 32)}`;
+}
+
+function listHomeFolderIdsForUser(user) {
+  const ids = [];
+  const seen = new Set();
+  for (const subject of listUserSubjectCandidates(user)) {
+    const folderId = buildHomeFolderIdForSubject(subject.subjectType, subject.subjectId);
+    if (seen.has(folderId)) {
+      continue;
+    }
+    seen.add(folderId);
+    ids.push(folderId);
   }
-  if (email) {
-    ids.add(email);
-    ids.add(`email:${email}`);
+  return ids;
+}
+
+function toHomeFolderName(user) {
+  const looksMachineId = (value) => {
+    const normalized = String(value || "").trim();
+    if (!normalized) {
+      return false;
+    }
+    return (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized) ||
+      /^[0-9a-f]{24,}$/i.test(normalized)
+    );
+  };
+
+  const preferredUsername = String(user?.preferredUsername || "").trim();
+  const email = String(user?.email || "").trim().toLowerCase();
+  const displayName = String(user?.displayName || "").trim();
+  const userId = String(user?.userId || "").trim();
+
+  const selectSource =
+    preferredUsername ||
+    (email.includes("@") ? email.split("@")[0].trim() : email) ||
+    (!looksMachineId(displayName) ? displayName : "") ||
+    (!looksMachineId(userId) ? userId : "");
+
+  if (!selectSource) {
+    return HOME_FOLDER_NAME;
   }
-  if (id && id !== "anonymous") {
-    ids.add(id);
-    ids.add(`user:${id}`);
+
+  const normalized = String(selectSource).split("@")[0].trim();
+  return normalized || HOME_FOLDER_NAME;
+}
+
+function getUserSubjectIds(user) {
+  const ids = new Set();
+
+  for (const candidate of listUserSubjectCandidates(user)) {
+    ids.add(candidate.subjectId);
+    ids.add(`user:${candidate.subjectId}`);
+    if (candidate.subjectId.includes("@")) {
+      ids.add(`email:${candidate.subjectId}`);
+    }
   }
 
   return ids;
@@ -123,6 +202,26 @@ function getGroupSubjectIds(user) {
     ids.add(`group:${value}`);
   }
   return ids;
+}
+
+function matchesActorSubject(binding, actorUser) {
+  if (!binding || !actorUser) {
+    return false;
+  }
+
+  if (binding.subjectType === "public") {
+    return binding.subjectId === "*";
+  }
+
+  if (binding.subjectType === "user") {
+    return getUserSubjectIds(actorUser).has(String(binding.subjectId || "").trim());
+  }
+
+  if (binding.subjectType === "group") {
+    return getGroupSubjectIds(actorUser).has(String(binding.subjectId || "").trim());
+  }
+
+  return false;
 }
 
 function cloneState(state) {
@@ -269,6 +368,130 @@ export class AclService {
     );
 
     return true;
+  }
+
+  getUserHomeFolderId(user, { state = null } = {}) {
+    const homeFolderIds = listHomeFolderIdsForUser(user);
+    if (!homeFolderIds.length) {
+      return null;
+    }
+
+    if (state && Array.isArray(state.folders)) {
+      const existing = state.folders.find((folder) => homeFolderIds.includes(String(folder?.id || "")));
+      if (existing?.id) {
+        return String(existing.id);
+      }
+
+      const homeFolderName = toHomeFolderName(user);
+      const byName = state.folders.find(
+        (folder) => String(folder?.name || "").trim() === homeFolderName && (folder?.parentId ?? null) === null,
+      );
+      if (byName?.id) {
+        return String(byName.id);
+      }
+    }
+
+    return homeFolderIds[0];
+  }
+
+  async ensureUserHomeFolder(rawState, user, { mode = this.getAuthMode() } = {}) {
+    const state = normalizeStatePayload(rawState);
+    const subjects = listUserSubjectCandidates(user);
+    if (!subjects.length || mode === "off") {
+      return { state, changed: false, homeFolderId: null };
+    }
+
+    const subjectKeySet = new Set(subjects.map((subject) => `${subject.subjectType}:${subject.subjectId}`));
+    const homeFolderIdCandidates = listHomeFolderIdsForUser(user);
+    const knownHomeIds = new Set(homeFolderIdCandidates);
+
+    const existingBindings = await this.store.listBindings();
+    for (const binding of existingBindings) {
+      if (binding.resourceType !== "folder" || binding.role !== "owner" || binding.inherit !== true) {
+        continue;
+      }
+      const subjectKey = `${binding.subjectType}:${binding.subjectId}`;
+      if (!subjectKeySet.has(subjectKey)) {
+        continue;
+      }
+      const resourceId = String(binding.resourceExternalId || "").trim();
+      if (resourceId) {
+        knownHomeIds.add(resourceId);
+      }
+    }
+
+    let homeFolder = state.folders.find((folder) => knownHomeIds.has(String(folder.id))) || null;
+    const homeFolderId = homeFolder ? String(homeFolder.id) : homeFolderIdCandidates[0];
+    const homeFolderName = toHomeFolderName(user);
+    const now = nowMs();
+    let changed = false;
+
+    if (!homeFolder) {
+      homeFolder = {
+        id: homeFolderId,
+        name: homeFolderName,
+        parentId: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      state.folders.push(homeFolder);
+      changed = true;
+    } else {
+      const shouldRename =
+        homeFolderName !== HOME_FOLDER_NAME ||
+        !String(homeFolder.name || "").trim() ||
+        homeFolder.name === HOME_FOLDER_NAME;
+      if (shouldRename && homeFolder.name !== homeFolderName) {
+        homeFolder.name = homeFolderName;
+        homeFolder.updatedAt = now;
+        changed = true;
+      }
+      if (homeFolder.parentId !== null) {
+        homeFolder.parentId = null;
+        homeFolder.updatedAt = now;
+        changed = true;
+      }
+    }
+
+    if (!state.ui.expandedFolderIds.includes(homeFolderId)) {
+      state.ui.expandedFolderIds.push(homeFolderId);
+      changed = true;
+    }
+
+    await this.syncResourcesFromState(state);
+
+    const currentBindings = await this.store.listBindingsForResource("folder", homeFolderId);
+    const ownerBindingKeys = new Set(
+      currentBindings
+        .filter((binding) => binding.role === "owner" && binding.inherit === true)
+        .map((binding) => `${binding.subjectType}:${binding.subjectId}`),
+    );
+
+    for (const subject of subjects) {
+      const ownerKey = `${subject.subjectType}:${subject.subjectId}`;
+      if (ownerBindingKeys.has(ownerKey)) {
+        continue;
+      }
+      await this.store.putBinding(
+        createBindingInput({
+          resourceType: "folder",
+          resourceExternalId: homeFolderId,
+          subjectType: subject.subjectType,
+          subjectId: subject.subjectId,
+          role: "owner",
+          inherit: true,
+          createdBy: "system",
+        }),
+      );
+      ownerBindingKeys.add(ownerKey);
+      changed = true;
+    }
+
+    return {
+      state,
+      changed,
+      homeFolderId,
+    };
   }
 
   async createSnapshot() {
@@ -588,8 +811,12 @@ export class AclService {
     }
 
     const now = nowMs();
+    const protectedHomeFolderId = this.getUserHomeFolderId(user, { state: currentNormalized });
 
     for (const [folderId, baselineFolder] of baselineFolderById.entries()) {
+      if (protectedHomeFolderId && folderId === protectedHomeFolderId) {
+        continue;
+      }
       if (!incomingFolderById.has(folderId)) {
         await this.assertAllowed(user, {
           action: "write",
@@ -736,10 +963,39 @@ export class AclService {
           createdAt: Number(incomingNote.createdAt) || now,
           updatedAt: Number(incomingNote.updatedAt) || now,
           deletedAt: incomingNote.deletedAt ? Number(incomingNote.deletedAt) || null : null,
+          shareId: typeof incomingNote.shareId === "string" ? incomingNote.shareId.trim() || null : null,
         };
 
         fullState.notes.push(nextNote);
         fullNoteById.set(nextNote.id, nextNote);
+        continue;
+      }
+
+      const baselineNote = baselineNoteById.get(noteId);
+      const incomingShareId =
+        typeof incomingNote.shareId === "string" && incomingNote.shareId.trim()
+          ? incomingNote.shareId.trim()
+          : null;
+      const baselineShareId =
+        baselineNote && typeof baselineNote.shareId === "string" && baselineNote.shareId.trim()
+          ? baselineNote.shareId.trim()
+          : null;
+      const noteChangedAgainstBaseline =
+        !baselineNote ||
+        String(incomingNote.title || "") !== String(baselineNote.title || "") ||
+        String(incomingNote.folderId || "") !== String(baselineNote.folderId || "") ||
+        String(incomingNote.content || "") !== String(baselineNote.content || "") ||
+        String(incomingNote.fileName || "") !== String(baselineNote.fileName || "") ||
+        String(incomingNote.deletedAt || "") !== String(baselineNote.deletedAt || "") ||
+        incomingShareId !== baselineShareId;
+
+      if (!noteChangedAgainstBaseline) {
+        continue;
+      }
+
+      const incomingUpdatedAt = Number(incomingNote.updatedAt) || 0;
+      const currentUpdatedAt = Number(fullNote.updatedAt) || 0;
+      if (incomingUpdatedAt > 0 && currentUpdatedAt > 0 && incomingUpdatedAt < currentUpdatedAt) {
         continue;
       }
 
@@ -769,6 +1025,8 @@ export class AclService {
       fullNote.folderId = targetFolderId;
       fullNote.content = incomingNote.content;
       fullNote.fileName = incomingNote.fileName;
+      fullNote.shareId =
+        incomingShareId || fullNote.shareId || null;
       fullNote.deletedAt = incomingNote.deletedAt ? Number(incomingNote.deletedAt) || null : null;
       fullNote.updatedAt = Number(incomingNote.updatedAt) || now;
     }
@@ -862,6 +1120,15 @@ export class AclService {
       snapshot,
     });
 
+    const isSelfOwnerBinding =
+      String(existing.role || "").trim().toLowerCase() === "owner" &&
+      matchesActorSubject(existing, actorUser);
+    if (isSelfOwnerBinding) {
+      const error = new Error("Owner cannot revoke own owner access.");
+      error.status = 400;
+      throw error;
+    }
+
     return this.store.deleteBinding(id);
   }
 
@@ -878,7 +1145,71 @@ export class AclService {
     return this.store.listBindingsForResource(resourceType, resourceExternalId);
   }
 
-  async getViewerContext(user, { mode = this.getAuthMode() } = {}) {
+  async listEffectiveBindingsForResource({
+    actorUser,
+    resourceType,
+    resourceExternalId,
+    mode = this.getAuthMode(),
+  }) {
+    const snapshot = await this.createSnapshot();
+    await this.assertAllowed(actorUser, {
+      action: "manage",
+      resourceType,
+      resourceExternalId,
+      mode,
+      snapshot,
+    });
+
+    const path = this.getResourcePath(snapshot, resourceType, resourceExternalId);
+    const directBindings = await this.store.listBindingsForResource(resourceType, resourceExternalId);
+    const effectiveBindings = [];
+
+    for (let depth = 0; depth < path.length; depth += 1) {
+      const resource = path[depth];
+      const key = resourceKey(resource.type, resource.externalId);
+      const resourceBindings = snapshot.bindingsByResourceKey.get(key) || [];
+      const isDirect = depth === 0;
+
+      for (const binding of resourceBindings) {
+        if (!isDirect && binding.inherit === false) {
+          continue;
+        }
+        const isSelfOwnerBinding =
+          String(binding.role || "").trim().toLowerCase() === "owner" &&
+          matchesActorSubject(binding, actorUser);
+        effectiveBindings.push({
+          ...binding,
+          relation: isDirect ? "direct" : "inherited",
+          sourceResourceType: resource.type,
+          sourceResourceExternalId: resource.externalId,
+          canRevoke: Boolean(binding.id) && !isSelfOwnerBinding,
+        });
+      }
+    }
+
+    effectiveBindings.sort((left, right) => {
+      const byRelation = left.relation.localeCompare(right.relation);
+      if (byRelation !== 0) {
+        return byRelation;
+      }
+      const bySubjectType = String(left.subjectType || "").localeCompare(String(right.subjectType || ""));
+      if (bySubjectType !== 0) {
+        return bySubjectType;
+      }
+      const bySubjectId = String(left.subjectId || "").localeCompare(String(right.subjectId || ""));
+      if (bySubjectId !== 0) {
+        return bySubjectId;
+      }
+      return String(left.id || "").localeCompare(String(right.id || ""));
+    });
+
+    return {
+      directBindings,
+      effectiveBindings,
+    };
+  }
+
+  async getViewerContext(user, { mode = this.getAuthMode(), state = null } = {}) {
     return {
       authMode: mode,
       workspace: await this.getCapabilitiesForResource(user, {
@@ -890,9 +1221,12 @@ export class AclService {
         id: user?.id || "anonymous",
         userId: user?.userId || "",
         email: user?.email || "",
+        preferredUsername: user?.preferredUsername || "",
         groups: Array.isArray(user?.groups) ? user.groups : [],
         isAuthenticated: Boolean(user?.isAuthenticated),
+        displayName: user?.displayName || user?.email || user?.userId || user?.id || "anonymous",
       },
+      homeFolderId: this.getUserHomeFolderId(user, { state }),
     };
   }
 }

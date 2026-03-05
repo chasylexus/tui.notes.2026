@@ -29,9 +29,12 @@ const STATE_API_ENDPOINT = "/api/state";
 const ME_API_ENDPOINT = "/api/me";
 const CAPABILITIES_API_ENDPOINT = "/api/me/capabilities";
 const EVENTS_API_ENDPOINT = "/api/events";
+const PRESENCE_HEARTBEAT_API_ENDPOINT = "/api/presence/heartbeat";
+const STATE_CLIENT_ID_HEADER = "X-Tui-Client-Id";
 const MEDIA_UPLOAD_ENDPOINT = "/api/media/upload";
 const MEDIA_FILE_ENDPOINT = "/api/media/file";
-const NOTE_LINK_QUERY_PARAM = "note";
+const NOTE_LINK_QUERY_PARAM = "ref";
+const LEGACY_NOTE_LINK_QUERY_PARAM = "note";
 const THEME_STORAGE_KEY = "themeMode";
 const LAYOUT_STORAGE_KEY = "layoutPrefs";
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -45,6 +48,9 @@ const DESKTOP_BREAKPOINT = 860;
 const NOTE_TITLE_SUFFIX_LENGTH = 6;
 const REMOTE_SYNC_INTERVAL_MS = 1500;
 const REMOTE_EVENTS_RECONNECT_MS = 1500;
+const LOCAL_ACTIVITY_GRACE_MS = 2000;
+const PRESENCE_HEARTBEAT_INTERVAL_MS = 1200;
+const PRESENCE_STALE_MS = 14_000;
 const AUDIO_EXTENSIONS = new Set([
   "m4a",
   "mp3",
@@ -80,6 +86,8 @@ const ICONS = {
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><path d="M12 11v6"></path><path d="M9 14h6"></path></svg>',
   collapsePanel:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h18v16H3z"></path><path d="M9 4v16"></path><path d="M14 12h5"></path><path d="M16 9l-3 3 3 3"></path></svg>',
+  back:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"></path></svg>',
 };
 
 const chartPluginOptions = {
@@ -152,6 +160,9 @@ app.innerHTML = `
     <aside id="notes-panel" class="panel notes-panel">
       <div class="panel-header notes-panel-header">
         <div id="notes-leading" class="notes-leading">
+          <button id="notes-back-btn" class="panel-icon-btn mobile-nav-btn" title="Back to folders" aria-label="Back to folders" type="button">
+            <span class="ui-icon">${ICONS.back}</span>
+          </button>
           <span id="notes-title" class="panel-title">All Notes</span>
         </div>
         <div id="notes-header-actions" class="panel-header-actions">
@@ -167,6 +178,9 @@ app.innerHTML = `
 
     <main class="editor-pane">
       <div class="editor-header">
+        <button id="editor-back-btn" class="panel-icon-btn mobile-nav-btn" title="Back to notes" aria-label="Back to notes" type="button">
+          <span class="ui-icon">${ICONS.back}</span>
+        </button>
         <input id="note-title-input" class="note-title-input" placeholder="Untitled" />
         <div class="editor-header-actions">
           <span id="save-indicator" class="save-indicator">Saved</span>
@@ -195,49 +209,36 @@ app.innerHTML = `
       </div>
       <div class="acl-modal-body">
         <p id="acl-resource-label" class="acl-resource-label"></p>
+        <div class="acl-current-access">
+          <span class="acl-section-label">People with access</span>
+          <div id="acl-current-access-list" class="acl-current-access-list"></div>
+        </div>
         <label class="acl-field">
-          <span>Action</span>
-          <select id="acl-action-select">
-            <option value="grant">Grant access</option>
-            <option value="revoke">Revoke access</option>
+          <span>Subject type</span>
+          <select id="acl-subject-type">
+            <option value="user">User</option>
+            <option value="group">Group</option>
           </select>
         </label>
-
-        <div id="acl-grant-fields">
-          <label class="acl-field">
-            <span>Subject type</span>
-            <select id="acl-subject-type">
-              <option value="user">User</option>
-              <option value="group">Group</option>
-            </select>
-          </label>
-          <label class="acl-field">
-            <span>Subject</span>
-            <input id="acl-subject-id" type="text" placeholder="bob@example.com or group name" />
-          </label>
-          <label class="acl-field">
-            <span>Role</span>
-            <select id="acl-role-select">
-              <option value="viewer">viewer</option>
-              <option value="editor">editor</option>
-              <option value="owner">owner</option>
-            </select>
-          </label>
-          <label class="acl-field">
-            <span>Propagation</span>
-            <select id="acl-inherit-select">
-              <option value="inherit">Apply to nested resources</option>
-              <option value="direct">Only this resource</option>
-            </select>
-          </label>
-        </div>
-
-        <div id="acl-revoke-fields" hidden>
-          <label class="acl-field">
-            <span>Binding</span>
-            <select id="acl-binding-select"></select>
-          </label>
-        </div>
+        <label class="acl-field">
+          <span>Subject</span>
+          <input id="acl-subject-id" type="text" placeholder="bob@example.com or group name" />
+        </label>
+        <label class="acl-field">
+          <span>Role</span>
+          <select id="acl-role-select">
+            <option value="viewer">viewer</option>
+            <option value="editor">editor</option>
+            <option value="owner">owner</option>
+          </select>
+        </label>
+        <label class="acl-field">
+          <span>Propagation</span>
+          <select id="acl-inherit-select">
+            <option value="inherit">Apply to nested resources</option>
+            <option value="direct">Only this resource</option>
+          </select>
+        </label>
       </div>
       <div class="acl-modal-actions">
         <button id="acl-cancel-btn" type="button">Cancel</button>
@@ -257,11 +258,13 @@ const elements = {
   foldersResizer: document.querySelector("#folders-resizer"),
   notesPanel: document.querySelector("#notes-panel"),
   notesLeading: document.querySelector("#notes-leading"),
+  notesBackBtn: document.querySelector("#notes-back-btn"),
   notesTitle: document.querySelector("#notes-title"),
   noteList: document.querySelector("#note-list"),
   notesResizer: document.querySelector("#notes-resizer"),
   newFolderBtn: document.querySelector("#new-folder-btn"),
   toggleFoldersBtn: document.querySelector("#toggle-folders-btn"),
+  editorBackBtn: document.querySelector("#editor-back-btn"),
   newNoteBtn: document.querySelector("#new-note-btn"),
   noteTitleInput: document.querySelector("#note-title-input"),
   saveIndicator: document.querySelector("#save-indicator"),
@@ -270,14 +273,11 @@ const elements = {
   contextMenu: document.querySelector("#context-menu"),
   aclModal: document.querySelector("#acl-modal"),
   aclResourceLabel: document.querySelector("#acl-resource-label"),
-  aclActionSelect: document.querySelector("#acl-action-select"),
-  aclGrantFields: document.querySelector("#acl-grant-fields"),
-  aclRevokeFields: document.querySelector("#acl-revoke-fields"),
+  aclCurrentAccessList: document.querySelector("#acl-current-access-list"),
   aclSubjectType: document.querySelector("#acl-subject-type"),
   aclSubjectId: document.querySelector("#acl-subject-id"),
   aclRoleSelect: document.querySelector("#acl-role-select"),
   aclInheritSelect: document.querySelector("#acl-inherit-select"),
-  aclBindingSelect: document.querySelector("#acl-binding-select"),
   aclCancelBtn: document.querySelector("#acl-cancel-btn"),
   aclApplyBtn: document.querySelector("#acl-apply-btn"),
 };
@@ -297,6 +297,7 @@ let ignoreEditorChange = false;
 let saveTimer = null;
 let currentThemeMode = resolveInitialThemeMode();
 const layoutPrefs = resolveInitialLayoutPrefs();
+let mobileActivePanel = "notes";
 let dragState = null;
 let dragSourceEl = null;
 let dropTargetEl = null;
@@ -314,6 +315,8 @@ let remoteEventsReconnectTimer = null;
 let pendingRemoteRevision = 0;
 let lastSyncedSnapshot = null;
 let authMode = "off";
+let viewerUserKey = "anonymous";
+let viewerHomeFolderId = null;
 let workspaceCapabilities = {
   canRead: true,
   canWrite: true,
@@ -330,8 +333,42 @@ let activeNoteCapabilities = {
   canManage: true,
 };
 let aclDialogContext = null;
-let aclDialogBindings = [];
+let aclDialogDirectBindings = [];
+let aclDialogEffectiveBindings = [];
 let editorReadOnlyActive = false;
+const presenceClientId = createOpaqueId(28);
+let presenceHeartbeatTimer = null;
+let presenceHeartbeatInFlight = false;
+let pendingPresenceHeartbeat = false;
+let pendingPresenceHeartbeatFrame = 0;
+let presenceHeartbeatDebounceTimer = null;
+const remotePresenceByNoteId = new Map();
+const remotePresenceMaxUpdatedAtByNoteId = new Map();
+const remotePresenceOffsetCache = new Map();
+let lastEditorChangeAt = 0;
+let lastKnownPresenceSelection = null;
+let editorContentSyncTimer = null;
+let lastEditorInputType = "";
+let lastEditorInputAt = 0;
+
+const DEBUG_SYNC = (() => {
+  try {
+    return localStorage.getItem("tui.notes.debugSync") === "1";
+  } catch (_error) {
+    return false;
+  }
+})();
+
+function debugSyncLog(message, extra = null) {
+  if (!DEBUG_SYNC) {
+    return;
+  }
+  if (extra && typeof extra === "object") {
+    console.debug("[tui.notes.sync]", message, extra);
+    return;
+  }
+  console.debug("[tui.notes.sync]", message);
+}
 
 ensureValidStateShape();
 initializeExpandedFolders();
@@ -549,6 +586,58 @@ function normalizeRuntimeMediaUrlsInMarkdown(markdown, noteId = "") {
   );
 }
 
+function getRecentEditorInputType(maxAgeMs = 3000) {
+  if (Date.now() - lastEditorInputAt > Math.max(0, Number(maxAgeMs) || 0)) {
+    return "";
+  }
+  return String(lastEditorInputType || "").trim().toLowerCase();
+}
+
+function isDeleteLikeInputType(inputType) {
+  const type = String(inputType || "").trim().toLowerCase();
+  if (!type) {
+    return false;
+  }
+  return (
+    type.startsWith("delete") ||
+    type === "historyundo" ||
+    type === "historyredo" ||
+    type === "deletebycut"
+  );
+}
+
+function countListItems(markdown) {
+  const source = String(markdown || "");
+  if (!source) {
+    return 0;
+  }
+  return source.split("\n").filter((line) => /^\s*(?:[-*+]|\d+\.)\s+\S/.test(line)).length;
+}
+
+function hasCollapsedParagraphListBoundary(markdown) {
+  return /:[ \t]+(?:[-*+]|\d+\.)\s+\S/.test(String(markdown || ""));
+}
+
+function isLikelyTransientWysiwygMarkdown(currentMarkdown, nextMarkdown) {
+  const currentText = String(currentMarkdown || "");
+  const nextText = String(nextMarkdown || "");
+  if (!currentText || !nextText) {
+    return false;
+  }
+  const inputType = getRecentEditorInputType();
+  if (isDeleteLikeInputType(inputType)) {
+    return false;
+  }
+
+  const currentLength = currentText.length;
+  const nextLength = nextText.length;
+  const droppedTooMuch = currentLength > 120 && nextLength < currentLength * 0.75;
+  const lostListItems = countListItems(nextText) + 1 < countListItems(currentText);
+  const collapsedBoundary = hasCollapsedParagraphListBoundary(nextText) && /\n\s*(?:[-*+]|\d+\.)\s+\S/.test(currentText);
+
+  return droppedTooMuch || lostListItems || collapsedBoundary;
+}
+
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -635,6 +724,50 @@ function alertMediaUploadError(error) {
 
 function isDesktopLayout() {
   return window.innerWidth > DESKTOP_BREAKPOINT;
+}
+
+function isMobileLayout() {
+  return !isDesktopLayout();
+}
+
+function normalizeMobilePanel(panel) {
+  if (panel === "folders" || panel === "notes" || panel === "editor") {
+    return panel;
+  }
+  return "notes";
+}
+
+function getDefaultMobilePanel() {
+  const note = getActiveNote();
+  const hasEditableActiveNote =
+    Boolean(note) && selectedFolderId !== TRASH_FOLDER_ID && !isNoteInTrash(note);
+  return hasEditableActiveNote ? "editor" : "notes";
+}
+
+function applyMobilePanelView(preferredPanel = mobileActivePanel) {
+  if (!(elements.appShell instanceof HTMLElement)) {
+    return;
+  }
+
+  elements.appShell.classList.remove("mobile-view-folders", "mobile-view-notes", "mobile-view-editor");
+
+  if (!isMobileLayout()) {
+    return;
+  }
+
+  const requestedPanel = normalizeMobilePanel(preferredPanel);
+  const fallbackPanel = getDefaultMobilePanel();
+  const nextPanel = requestedPanel === "editor" && fallbackPanel !== "editor" ? "notes" : requestedPanel;
+
+  mobileActivePanel = nextPanel;
+  elements.appShell.classList.add(`mobile-view-${nextPanel}`);
+}
+
+function setMobilePanel(panel) {
+  if (!isMobileLayout()) {
+    return;
+  }
+  applyMobilePanelView(panel);
 }
 
 function moveToggleButton(
@@ -735,6 +868,7 @@ function applyLayoutPrefs(
       syncToggleButtonPlacement(animateToggle);
     }
     updateFoldersToggleButtonState();
+    applyMobilePanelView();
     return;
   }
 
@@ -772,6 +906,8 @@ function applyLayoutPrefs(
   if (shouldPersist) {
     persistLayoutPrefs();
   }
+
+  applyMobilePanelView();
 }
 
 function toggleFoldersPanel() {
@@ -841,6 +977,32 @@ function createId() {
   return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function createOpaqueId(byteLength = 24) {
+  const safeByteLength = Number.isFinite(byteLength) && byteLength > 0 ? Math.floor(byteLength) : 24;
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = new Uint8Array(safeByteLength);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  let fallback = "";
+  while (fallback.length < safeByteLength * 2) {
+    fallback += Math.random().toString(16).slice(2);
+  }
+  return fallback.slice(0, safeByteLength * 2);
+}
+
+function normalizeShareId(rawValue, noteId = "") {
+  const value = String(rawValue || "").trim();
+  if (value.length >= 24) {
+    return value;
+  }
+  const base = String(noteId || "").replace(/[^a-zA-Z0-9]/g, "");
+  if (base.length >= 24) {
+    return base.slice(0, 48);
+  }
+  return createOpaqueId(24);
+}
+
 function createRandomToken(length = NOTE_TITLE_SUFFIX_LENGTH) {
   const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
   const size = Number.isFinite(length) && length > 0 ? Math.floor(length) : NOTE_TITLE_SUFFIX_LENGTH;
@@ -874,6 +1036,7 @@ function createDefaultState() {
     notes: [
       {
         id: createId(),
+        shareId: createOpaqueId(24),
         title: "Welcome",
         folderId: null,
         content: starterContent,
@@ -945,8 +1108,25 @@ function hasWritePermissionForActiveNote() {
 function getRequestedNoteIdFromUrl() {
   try {
     const url = new URL(window.location.href);
-    const noteId = String(url.searchParams.get(NOTE_LINK_QUERY_PARAM) || "").trim();
-    return noteId || null;
+    const requestedOpaqueId = String(url.searchParams.get(NOTE_LINK_QUERY_PARAM) || "").trim();
+    const requestedLegacyId = String(url.searchParams.get(LEGACY_NOTE_LINK_QUERY_PARAM) || "").trim();
+    if (requestedOpaqueId) {
+      const byShareId = state.notes.find((note) => String(note.shareId || "") === requestedOpaqueId);
+      if (byShareId) {
+        return byShareId.id;
+      }
+      const byId = state.notes.find((note) => String(note.id) === requestedOpaqueId);
+      if (byId) {
+        return byId.id;
+      }
+    }
+    if (requestedLegacyId) {
+      const byLegacy = state.notes.find((note) => String(note.id) === requestedLegacyId);
+      if (byLegacy) {
+        return byLegacy.id;
+      }
+    }
+    return null;
   } catch (_error) {
     return null;
   }
@@ -956,9 +1136,13 @@ function updateNoteLinkInUrl(noteId) {
   try {
     const url = new URL(window.location.href);
     if (noteId) {
-      url.searchParams.set(NOTE_LINK_QUERY_PARAM, String(noteId));
+      const note = state.notes.find((item) => item.id === noteId) || null;
+      const opaqueId = normalizeShareId(note?.shareId, note?.id || noteId);
+      url.searchParams.set(NOTE_LINK_QUERY_PARAM, opaqueId);
+      url.searchParams.delete(LEGACY_NOTE_LINK_QUERY_PARAM);
     } else {
       url.searchParams.delete(NOTE_LINK_QUERY_PARAM);
+      url.searchParams.delete(LEGACY_NOTE_LINK_QUERY_PARAM);
     }
     const nextUrl = `${url.pathname}${url.search}${url.hash}`;
     window.history.replaceState(window.history.state, "", nextUrl);
@@ -968,8 +1152,11 @@ function updateNoteLinkInUrl(noteId) {
 }
 
 function buildShareLinkForNote(noteId) {
+  const note = state.notes.find((item) => item.id === noteId) || null;
+  const opaqueId = normalizeShareId(note?.shareId, note?.id || noteId);
   const url = new URL(window.location.href);
-  url.searchParams.set(NOTE_LINK_QUERY_PARAM, String(noteId));
+  url.searchParams.set(NOTE_LINK_QUERY_PARAM, opaqueId);
+  url.searchParams.delete(LEGACY_NOTE_LINK_QUERY_PARAM);
   return url.toString();
 }
 
@@ -989,6 +1176,23 @@ function getEditorSurfaceElements() {
   return { root, markdownTextarea, wysiwygSurface };
 }
 
+function getWysiwygProseMirrorView() {
+  if (!editor || typeof editor.getCurrentModeEditor !== "function" || editor.isMarkdownMode?.()) {
+    return null;
+  }
+
+  try {
+    const modeEditor = editor.getCurrentModeEditor();
+    const view = modeEditor?.view;
+    if (!view || typeof view.coordsAtPos !== "function" || !view.state?.selection) {
+      return null;
+    }
+    return view;
+  } catch (_error) {
+    return null;
+  }
+}
+
 function applyEditorReadOnlyState(readOnly) {
   editorReadOnlyActive = Boolean(readOnly);
   const { root, markdownTextarea, wysiwygSurface } = getEditorSurfaceElements();
@@ -1003,6 +1207,596 @@ function applyEditorReadOnlyState(readOnly) {
 
   if (wysiwygSurface instanceof HTMLElement) {
     wysiwygSurface.setAttribute("contenteditable", editorReadOnlyActive ? "false" : "true");
+  }
+}
+
+function getEditorDefaultUiRoot() {
+  const { root } = getEditorSurfaceElements();
+  return root instanceof HTMLElement ? root : null;
+}
+
+function ensureRemotePresenceLayer() {
+  const root = getEditorDefaultUiRoot();
+  if (!(root instanceof HTMLElement)) {
+    return null;
+  }
+  let layer = root.querySelector(".remote-presence-layer");
+  if (!(layer instanceof HTMLElement)) {
+    layer = document.createElement("div");
+    layer.className = "remote-presence-layer";
+    layer.setAttribute("aria-hidden", "true");
+    root.appendChild(layer);
+  }
+  return layer;
+}
+
+function hashStringToHue(value) {
+  const source = String(value || "");
+  let hash = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    hash = ((hash << 5) - hash + source.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash) % 360;
+}
+
+function getPresenceColorForUser(userKey) {
+  const hue = hashStringToHue(userKey || "user");
+  return `hsl(${hue} 82% 56%)`;
+}
+
+function getEditorModeName() {
+  return editor?.isMarkdownMode?.() ? "markdown" : "wysiwyg";
+}
+
+function domPointToTextOffset(root, node, offset) {
+  if (!(root instanceof HTMLElement) || !node || !root.contains(node)) {
+    return 0;
+  }
+  const range = document.createRange();
+  range.setStart(root, 0);
+  try {
+    range.setEnd(node, Math.max(0, Number(offset) || 0));
+  } catch (_error) {
+    return 0;
+  }
+  const fragment = range.cloneContents();
+  const walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT);
+  let total = 0;
+  let textNode = walker.nextNode();
+  while (textNode) {
+    total += textNode.textContent?.length || 0;
+    textNode = walker.nextNode();
+  }
+  return Math.max(0, total);
+}
+
+function getWysiwygSelectionSnapshot(view, surface) {
+  if (view?.state?.selection) {
+    return {
+      mode: "wysiwyg",
+      anchor: Math.max(0, Number(view.state.selection.anchor) || 0),
+      head: Math.max(0, Number(view.state.selection.head) || 0),
+    };
+  }
+
+  if (!(surface instanceof HTMLElement)) {
+    return null;
+  }
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount < 1) {
+    return null;
+  }
+  if (!surface.contains(selection.anchorNode) || !surface.contains(selection.focusNode)) {
+    return null;
+  }
+
+  const anchor = domPointToTextOffset(surface, selection.anchorNode, selection.anchorOffset);
+  const head = domPointToTextOffset(surface, selection.focusNode, selection.focusOffset);
+  return { mode: "wysiwyg", anchor, head };
+}
+
+function getMarkdownSelectionSnapshot(textarea) {
+  if (!(textarea instanceof HTMLTextAreaElement)) {
+    return null;
+  }
+  return {
+    mode: "markdown",
+    anchor: Math.max(0, Number(textarea.selectionStart) || 0),
+    head: Math.max(0, Number(textarea.selectionEnd) || 0),
+  };
+}
+
+function rememberLocalPresenceSelection(noteId, mode, anchor, head) {
+  const normalizedNoteId = String(noteId || "").trim();
+  if (!normalizedNoteId) {
+    return;
+  }
+  lastKnownPresenceSelection = {
+    noteId: normalizedNoteId,
+    mode: mode === "markdown" ? "markdown" : "wysiwyg",
+    anchor: Math.max(0, Number(anchor) || 0),
+    head: Math.max(0, Number(head) || 0),
+    capturedAt: Date.now(),
+  };
+}
+
+function getRememberedPresenceSelection(noteId, mode) {
+  if (!lastKnownPresenceSelection) {
+    return null;
+  }
+  if (lastKnownPresenceSelection.noteId !== String(noteId || "").trim()) {
+    return null;
+  }
+  if (lastKnownPresenceSelection.mode !== (mode === "markdown" ? "markdown" : "wysiwyg")) {
+    return null;
+  }
+  return {
+    mode: lastKnownPresenceSelection.mode,
+    anchor: Math.max(0, Number(lastKnownPresenceSelection.anchor) || 0),
+    head: Math.max(0, Number(lastKnownPresenceSelection.head) || 0),
+  };
+}
+
+function getLocalPresenceSnapshot() {
+  const note = getActiveNote();
+  if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
+    return {
+      clientId: presenceClientId,
+      noteId: null,
+      mode: getEditorModeName(),
+      anchor: 0,
+      head: 0,
+    };
+  }
+
+  const { markdownTextarea, wysiwygSurface } = getEditorSurfaceElements();
+  const mode = getEditorModeName();
+  const wysiwygView = mode === "wysiwyg" ? getWysiwygProseMirrorView() : null;
+  const selection = mode === "markdown"
+    ? getMarkdownSelectionSnapshot(markdownTextarea)
+    : getWysiwygSelectionSnapshot(wysiwygView, wysiwygSurface);
+
+  if (!selection) {
+    const remembered = getRememberedPresenceSelection(note.id, mode);
+    if (remembered) {
+      return {
+        clientId: presenceClientId,
+        noteId: note.id,
+        mode: remembered.mode,
+        anchor: remembered.anchor,
+        head: remembered.head,
+      };
+    }
+    return {
+      clientId: presenceClientId,
+      noteId: note.id,
+      mode,
+      anchor: 0,
+      head: 0,
+    };
+  }
+
+  rememberLocalPresenceSelection(note.id, selection.mode, selection.anchor, selection.head);
+  return {
+    clientId: presenceClientId,
+    noteId: note.id,
+    mode: selection.mode,
+    anchor: Math.max(0, Number(selection.anchor) || 0),
+    head: Math.max(0, Number(selection.head) || 0),
+  };
+}
+
+function schedulePresenceHeartbeatDeferred() {
+  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+    schedulePresenceHeartbeat();
+    return;
+  }
+  if (pendingPresenceHeartbeatFrame) {
+    window.cancelAnimationFrame(pendingPresenceHeartbeatFrame);
+  }
+  pendingPresenceHeartbeatFrame = window.requestAnimationFrame(() => {
+    pendingPresenceHeartbeatFrame = 0;
+    schedulePresenceHeartbeat();
+  });
+}
+
+function schedulePresenceHeartbeatDebounced(delayMs = 90) {
+  const safeDelay = Math.max(0, Number(delayMs) || 0);
+  if (presenceHeartbeatDebounceTimer) {
+    clearTimeout(presenceHeartbeatDebounceTimer);
+    presenceHeartbeatDebounceTimer = null;
+  }
+  presenceHeartbeatDebounceTimer = setTimeout(() => {
+    presenceHeartbeatDebounceTimer = null;
+    schedulePresenceHeartbeat();
+  }, safeDelay);
+}
+
+async function flushPresenceHeartbeat() {
+  if (presenceHeartbeatInFlight) {
+    pendingPresenceHeartbeat = true;
+    return;
+  }
+
+  presenceHeartbeatInFlight = true;
+  try {
+    do {
+      pendingPresenceHeartbeat = false;
+      const payload = getLocalPresenceSnapshot();
+      await apiRequest(PRESENCE_HEARTBEAT_API_ENDPOINT, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    } while (pendingPresenceHeartbeat);
+  } catch (error) {
+    if (Number(error?.status) !== 401 && Number(error?.status) !== 403) {
+      console.error("[tui.notes.2026] presence heartbeat failed", error);
+    }
+  } finally {
+    presenceHeartbeatInFlight = false;
+  }
+}
+
+function schedulePresenceHeartbeat() {
+  pendingPresenceHeartbeat = true;
+  void flushPresenceHeartbeat();
+}
+
+function handleLocalCursorActivity() {
+  if (!stateReady || !isEditorFocused()) {
+    return;
+  }
+  schedulePresenceHeartbeatDebounced();
+  renderRemotePresence();
+}
+
+function startPresenceHeartbeatLoop() {
+  if (presenceHeartbeatTimer) {
+    clearInterval(presenceHeartbeatTimer);
+  }
+  presenceHeartbeatTimer = window.setInterval(() => {
+    schedulePresenceHeartbeat();
+  }, PRESENCE_HEARTBEAT_INTERVAL_MS);
+}
+
+function stopPresenceHeartbeatLoop() {
+  if (!presenceHeartbeatTimer) {
+    if (presenceHeartbeatDebounceTimer) {
+      clearTimeout(presenceHeartbeatDebounceTimer);
+      presenceHeartbeatDebounceTimer = null;
+    }
+    if (pendingPresenceHeartbeatFrame && typeof window !== "undefined") {
+      window.cancelAnimationFrame?.(pendingPresenceHeartbeatFrame);
+      pendingPresenceHeartbeatFrame = 0;
+    }
+    return;
+  }
+  clearInterval(presenceHeartbeatTimer);
+  presenceHeartbeatTimer = null;
+  if (presenceHeartbeatDebounceTimer) {
+    clearTimeout(presenceHeartbeatDebounceTimer);
+    presenceHeartbeatDebounceTimer = null;
+  }
+  if (pendingPresenceHeartbeatFrame && typeof window !== "undefined") {
+    window.cancelAnimationFrame?.(pendingPresenceHeartbeatFrame);
+    pendingPresenceHeartbeatFrame = 0;
+  }
+}
+
+function measureTextareaCharacterWidth(textarea, font) {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return 8;
+  }
+  context.font = font;
+  const width = context.measureText("M").width;
+  return Number.isFinite(width) && width > 0 ? width : 8;
+}
+
+function getMarkdownCaretViewportRect(textarea, offset) {
+  if (!(textarea instanceof HTMLTextAreaElement)) {
+    return null;
+  }
+  const safeOffset = Math.max(0, Math.min(Number(offset) || 0, textarea.value.length));
+  const before = textarea.value.slice(0, safeOffset);
+  const lines = before.split("\n");
+  const lineIndex = Math.max(0, lines.length - 1);
+  const columnIndex = lines.at(-1)?.length || 0;
+  const style = window.getComputedStyle(textarea);
+  const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4 || 18;
+  const font = [
+    style.fontStyle,
+    style.fontVariant,
+    style.fontWeight,
+    style.fontSize,
+    style.fontFamily,
+  ].join(" ");
+  const charWidth = measureTextareaCharacterWidth(textarea, font);
+  const paddingLeft = parseFloat(style.paddingLeft) || 0;
+  const paddingTop = parseFloat(style.paddingTop) || 0;
+  const areaRect = textarea.getBoundingClientRect();
+  const left = areaRect.left + paddingLeft + columnIndex * charWidth - textarea.scrollLeft;
+  const top = areaRect.top + paddingTop + lineIndex * lineHeight - textarea.scrollTop;
+  return {
+    left,
+    top,
+    height: lineHeight,
+  };
+}
+
+function findTextNodeAtOffset(root, offset) {
+  if (!(root instanceof HTMLElement)) {
+    return null;
+  }
+  const targetOffset = Math.max(0, Number(offset) || 0);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let traversed = 0;
+  let lastTextNode = null;
+  let lastTextLength = 0;
+  let node = walker.nextNode();
+  while (node) {
+    const length = node.textContent?.length || 0;
+    lastTextNode = node;
+    lastTextLength = length;
+    if (targetOffset <= traversed + length) {
+      return {
+        node,
+        offset: Math.max(0, targetOffset - traversed),
+      };
+    }
+    traversed += length;
+    node = walker.nextNode();
+  }
+  if (lastTextNode) {
+    return {
+      node: lastTextNode,
+      offset: lastTextLength,
+    };
+  }
+  return null;
+}
+
+function getWysiwygTextLength(surface) {
+  if (!(surface instanceof HTMLElement)) {
+    return 0;
+  }
+  const walker = document.createTreeWalker(surface, NodeFilter.SHOW_TEXT);
+  let total = 0;
+  let node = walker.nextNode();
+  while (node) {
+    total += node.textContent?.length || 0;
+    node = walker.nextNode();
+  }
+  return Math.max(0, total);
+}
+
+function getWysiwygMaxOffset(view, surface) {
+  const docSize = Number(view?.state?.doc?.content?.size);
+  if (Number.isFinite(docSize) && docSize > 0) {
+    return Math.max(1, Math.floor(docSize));
+  }
+  return Math.max(0, getWysiwygTextLength(surface));
+}
+
+function getWysiwygCaretViewportRectFromTextOffset(surface, offset) {
+  if (!(surface instanceof HTMLElement)) {
+    return null;
+  }
+  const point = findTextNodeAtOffset(surface, offset);
+  if (!point) {
+    const fallbackRect = surface.getBoundingClientRect();
+    return {
+      left: fallbackRect.left + 12,
+      top: fallbackRect.top + 12,
+      height: parseFloat(window.getComputedStyle(surface).lineHeight) || 18,
+    };
+  }
+  const lineHeightFallback = parseFloat(window.getComputedStyle(surface).lineHeight) || 18;
+  const textLength = point.node.textContent?.length || 0;
+
+  const getCollapsedRect = (nodeOffset) => {
+    const range = document.createRange();
+    try {
+      range.setStart(point.node, nodeOffset);
+      range.setEnd(point.node, nodeOffset);
+    } catch (_error) {
+      return null;
+    }
+    return range.getClientRects()[0] || range.getBoundingClientRect() || null;
+  };
+
+  const getCharacterRect = (fromOffset, toOffset) => {
+    const range = document.createRange();
+    try {
+      range.setStart(point.node, fromOffset);
+      range.setEnd(point.node, toOffset);
+    } catch (_error) {
+      return null;
+    }
+    return range.getClientRects()[0] || range.getBoundingClientRect() || null;
+  };
+
+  let rect = getCollapsedRect(point.offset);
+  if (
+    !rect ||
+    (!Number.isFinite(rect.height) || rect.height <= 0) ||
+    (!Number.isFinite(rect.top) || !Number.isFinite(rect.left))
+  ) {
+    rect = null;
+  }
+
+  if (!rect && point.offset > 0) {
+    const prevCharRect = getCharacterRect(point.offset - 1, point.offset);
+    if (prevCharRect) {
+      return {
+        left: prevCharRect.right,
+        top: prevCharRect.top,
+        height: prevCharRect.height || lineHeightFallback,
+      };
+    }
+  }
+
+  if (!rect && point.offset < textLength) {
+    const nextCharRect = getCharacterRect(point.offset, point.offset + 1);
+    if (nextCharRect) {
+      return {
+        left: nextCharRect.left,
+        top: nextCharRect.top,
+        height: nextCharRect.height || lineHeightFallback,
+      };
+    }
+  }
+
+  if (!rect) {
+    return null;
+  }
+
+  if (point.offset === textLength && textLength > 0) {
+    const prevCharRect = getCharacterRect(point.offset - 1, point.offset);
+    if (prevCharRect) {
+      return {
+        left: prevCharRect.right,
+        top: prevCharRect.top,
+        height: prevCharRect.height || rect.height || lineHeightFallback,
+      };
+    }
+  }
+
+  return {
+    left: rect.left,
+    top: rect.top,
+    height: rect.height || lineHeightFallback,
+  };
+}
+
+function getWysiwygCaretViewportRect(view, surface, offset) {
+  if (view && typeof view.coordsAtPos === "function") {
+    const maxOffset = getWysiwygMaxOffset(view, surface);
+    const safeOffset = Math.max(1, Math.min(Math.max(0, Number(offset) || 0), maxOffset));
+
+    if (Number.isFinite(safeOffset) && safeOffset > 0) {
+      const candidates = [safeOffset, Math.max(1, safeOffset - 1), Math.min(maxOffset, safeOffset + 1)];
+      for (const position of candidates) {
+        try {
+          const coords = view.coordsAtPos(position);
+          if (
+            coords &&
+            Number.isFinite(coords.left) &&
+            Number.isFinite(coords.top) &&
+            Number.isFinite(coords.bottom)
+          ) {
+            return {
+              left: coords.left,
+              top: coords.top,
+              height: Math.max(14, coords.bottom - coords.top),
+            };
+          }
+        } catch (_error) {
+          // continue with fallback candidates
+        }
+      }
+    }
+  }
+
+  return getWysiwygCaretViewportRectFromTextOffset(surface, offset);
+}
+
+function renderRemotePresence() {
+  const layer = ensureRemotePresenceLayer();
+  if (!(layer instanceof HTMLElement)) {
+    return;
+  }
+  layer.innerHTML = "";
+
+  const note = getActiveNote();
+  if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
+    return;
+  }
+
+  const participants = Array.isArray(remotePresenceByNoteId.get(note.id))
+    ? remotePresenceByNoteId.get(note.id)
+    : [];
+  if (!participants.length) {
+    for (const cacheKey of remotePresenceOffsetCache.keys()) {
+      if (cacheKey.startsWith(`${note.id}::`)) {
+        remotePresenceOffsetCache.delete(cacheKey);
+      }
+    }
+    return;
+  }
+
+  const mode = getEditorModeName();
+  const now = Date.now();
+  const rootRect = layer.getBoundingClientRect();
+  const { markdownTextarea, wysiwygSurface } = getEditorSurfaceElements();
+  const wysiwygView = mode === "wysiwyg" ? getWysiwygProseMirrorView() : null;
+  const maxCaretOffset = mode === "markdown"
+    ? Math.max(0, markdownTextarea?.value?.length || 0)
+    : getWysiwygMaxOffset(wysiwygView, wysiwygSurface);
+  const activeCacheKeys = new Set();
+
+  for (const participant of participants) {
+    const participantUserKey = String(participant?.userKey || "").trim();
+    const participantClientId = String(participant?.clientId || "").trim();
+    if (!participantUserKey || !participantClientId) {
+      continue;
+    }
+    if (participantUserKey === viewerUserKey && participantClientId === presenceClientId) {
+      continue;
+    }
+    if (String(participant?.mode || "") !== mode) {
+      continue;
+    }
+    if (now - (Number(participant?.updatedAt) || 0) > PRESENCE_STALE_MS) {
+      continue;
+    }
+
+    const rawCaretOffset = Math.max(0, Number(participant?.head ?? participant?.anchor) || 0);
+    const cacheKey = `${note.id}::${mode}::${participantUserKey}::${participantClientId}`;
+    activeCacheKeys.add(cacheKey);
+    const cachedOffset = Number(remotePresenceOffsetCache.get(cacheKey));
+    const hasCachedOffset = Number.isFinite(cachedOffset) && cachedOffset >= 0;
+
+    let caretOffset = Math.min(rawCaretOffset, maxCaretOffset);
+    if (rawCaretOffset > maxCaretOffset && hasCachedOffset && cachedOffset <= maxCaretOffset + 8) {
+      // Remote cursor can briefly run ahead of received content; keep prior stable position.
+      caretOffset = Math.max(0, Math.min(cachedOffset, maxCaretOffset));
+    }
+    const viewportRect = mode === "markdown"
+      ? getMarkdownCaretViewportRect(markdownTextarea, caretOffset)
+      : getWysiwygCaretViewportRect(wysiwygView, wysiwygSurface, caretOffset);
+    if (!viewportRect) {
+      continue;
+    }
+    remotePresenceOffsetCache.set(cacheKey, caretOffset);
+
+    const marker = document.createElement("div");
+    marker.className = "remote-cursor-marker";
+    marker.style.left = `${viewportRect.left - rootRect.left}px`;
+    marker.style.top = `${viewportRect.top - rootRect.top}px`;
+    marker.style.setProperty("--cursor-color", getPresenceColorForUser(participantUserKey));
+
+    const caret = document.createElement("span");
+    caret.className = "remote-cursor-caret";
+    caret.style.height = `${Math.max(14, Number(viewportRect.height) || 18)}px`;
+    marker.appendChild(caret);
+
+    const label = document.createElement("span");
+    label.className = "remote-cursor-label";
+    label.textContent = String(participant?.displayName || participantUserKey);
+    marker.appendChild(label);
+
+    layer.appendChild(marker);
+  }
+
+  for (const cacheKey of remotePresenceOffsetCache.keys()) {
+    if (!cacheKey.startsWith(`${note.id}::`)) {
+      continue;
+    }
+    if (!activeCacheKeys.has(cacheKey)) {
+      remotePresenceOffsetCache.delete(cacheKey);
+    }
   }
 }
 
@@ -1039,10 +1833,14 @@ async function refreshViewerContext() {
     const payload = await apiRequest(ME_API_ENDPOINT);
     authMode = String(payload?.authMode || "off");
     workspaceCapabilities = normalizeCapabilitiesPayload(payload?.workspace);
+    viewerUserKey = String(payload?.user?.id || payload?.user?.email || payload?.user?.userId || "anonymous").trim() || "anonymous";
+    viewerHomeFolderId = String(payload?.homeFolderId || "").trim() || null;
   } catch (error) {
     if (Number(error?.status) === 401 || Number(error?.status) === 403) {
       authMode = "enforce";
       workspaceCapabilities = { canRead: false, canWrite: false, canManage: false };
+      viewerUserKey = "anonymous";
+      viewerHomeFolderId = null;
       return;
     }
     throw error;
@@ -1103,8 +1901,15 @@ function normalizeAclRoleInput(rawValue) {
 async function fetchAclBindings(resourceType, resourceExternalId) {
   const safeType = encodeURIComponent(String(resourceType || ""));
   const safeId = encodeURIComponent(String(resourceExternalId || ""));
-  const payload = await apiRequest(`/api/acl/resource/${safeType}/${safeId}`);
-  return Array.isArray(payload?.bindings) ? payload.bindings : [];
+  const payload = await apiRequest(`/api/acl/resource/${safeType}/${safeId}?effective=1`);
+  return {
+    directBindings: Array.isArray(payload?.bindings) ? payload.bindings : [],
+    effectiveBindings: Array.isArray(payload?.effectiveBindings)
+      ? payload.effectiveBindings
+      : Array.isArray(payload?.bindings)
+        ? payload.bindings
+        : [],
+  };
 }
 
 async function grantAclBinding(binding) {
@@ -1121,44 +1926,89 @@ async function revokeAclBinding(bindingId) {
   });
 }
 
-function formatAclBindingLine(binding, index) {
-  const inheritLabel = binding?.inherit === false ? "direct only" : "inherit";
-  return `${index + 1}. ${binding.subjectType}:${binding.subjectId} -> ${binding.role} (${inheritLabel}) [${binding.id}]`;
+function formatAclBindingSubject(binding) {
+  const subjectType = String(binding?.subjectType || "").trim().toLowerCase();
+  const subjectId = String(binding?.subjectId || "").trim();
+  if (subjectType === "user") {
+    return subjectId || "user";
+  }
+  if (subjectType === "group") {
+    return `Group: ${subjectId || "group"}`;
+  }
+  if (subjectType === "public") {
+    return "Anyone";
+  }
+  return `${subjectType}:${subjectId}`;
 }
 
-function renderAclBindingOptions() {
-  if (!(elements.aclBindingSelect instanceof HTMLSelectElement)) {
-    return;
-  }
-
-  const options = aclDialogBindings.map((binding, index) => {
-    const label = formatAclBindingLine(binding, index);
-    return `<option value="${escapeHtml(binding.id)}">${escapeHtml(label)}</option>`;
-  });
-
-  if (!options.length) {
-    options.push('<option value="">No bindings available</option>');
-  }
-
-  elements.aclBindingSelect.innerHTML = options.join("");
-}
-
-function updateAclDialogSections() {
+async function refreshAclDialogBindings() {
   if (!aclDialogContext) {
+    aclDialogDirectBindings = [];
+    aclDialogEffectiveBindings = [];
+    renderAclCurrentAccessList();
     return;
   }
 
-  const action = String(elements.aclActionSelect?.value || "grant");
-  const revokeMode = action === "revoke";
-  elements.aclGrantFields.hidden = revokeMode;
-  elements.aclRevokeFields.hidden = !revokeMode;
-  elements.aclApplyBtn.textContent = revokeMode ? "Remove" : "Apply";
-  elements.aclApplyBtn.disabled = revokeMode && !aclDialogBindings.length;
+  const { directBindings, effectiveBindings } = await fetchAclBindings(
+    aclDialogContext.resourceType,
+    aclDialogContext.resourceExternalId,
+  );
+  aclDialogDirectBindings = directBindings;
+  aclDialogEffectiveBindings = effectiveBindings;
+  renderAclCurrentAccessList();
+}
+
+function renderAclCurrentAccessList() {
+  if (!(elements.aclCurrentAccessList instanceof HTMLElement)) {
+    return;
+  }
+
+  if (!aclDialogEffectiveBindings.length) {
+    elements.aclCurrentAccessList.innerHTML = '<div class="acl-access-empty">No access bindings yet</div>';
+    return;
+  }
+
+  elements.aclCurrentAccessList.innerHTML = aclDialogEffectiveBindings
+    .map((binding) => {
+      const subject = formatAclBindingSubject(binding);
+      const role = String(binding?.role || "").trim() || "viewer";
+      const sourceLabel = binding?.relation === "inherited"
+        ? `Inherited from ${String(binding?.sourceResourceType || "").trim()}:${String(binding?.sourceResourceExternalId || "").trim()}`
+        : binding?.inherit === false
+          ? "Direct (this only)"
+          : "Direct (this + nested)";
+      const canRevoke = Boolean(binding?.canRevoke);
+      const bindingId = String(binding?.id || "").trim();
+      const revokeTitle = binding?.relation === "inherited"
+        ? "Revoke binding at source resource"
+        : "Revoke access";
+      return `
+        <div class="acl-access-row">
+          <span class="acl-access-subject">${escapeHtml(subject)}</span>
+          <span class="acl-access-role">${escapeHtml(role)}</span>
+          <span class="acl-access-scope">${escapeHtml(sourceLabel)}</span>
+          <button
+            class="acl-access-revoke-btn"
+            type="button"
+            data-binding-id="${escapeHtml(bindingId)}"
+            ${canRevoke ? "" : "disabled"}
+            title="${canRevoke ? revokeTitle : "Cannot revoke this binding"}"
+          >
+            Revoke
+          </button>
+        </div>
+      `;
+    })
+    .join("");
 }
 
 function closeAclDialog() {
   aclDialogContext = null;
-  aclDialogBindings = [];
+  aclDialogDirectBindings = [];
+  aclDialogEffectiveBindings = [];
+  if (elements.aclCurrentAccessList instanceof HTMLElement) {
+    elements.aclCurrentAccessList.innerHTML = "";
+  }
   elements.aclModal.setAttribute("aria-hidden", "true");
   elements.aclModal.classList.remove("is-open");
 }
@@ -1176,20 +2026,47 @@ async function openAclDialog(resourceType, resourceExternalId, resourceLabel) {
   }
 
   aclDialogContext = { resourceType, resourceExternalId, resourceLabel };
-  aclDialogBindings = await fetchAclBindings(resourceType, resourceExternalId);
+  await refreshAclDialogBindings();
 
   elements.aclResourceLabel.textContent = resourceLabel;
-  elements.aclActionSelect.value = "grant";
   elements.aclSubjectType.value = "user";
   elements.aclSubjectId.value = "";
   elements.aclRoleSelect.value = "viewer";
   elements.aclInheritSelect.value = resourceType === "note" ? "direct" : "inherit";
-  renderAclBindingOptions();
-  updateAclDialogSections();
+  elements.aclApplyBtn.textContent = "Apply";
+  elements.aclApplyBtn.disabled = false;
 
   elements.aclModal.setAttribute("aria-hidden", "false");
   elements.aclModal.classList.add("is-open");
   elements.aclSubjectId.focus();
+}
+
+async function revokeAclBindingFromDialog(bindingId) {
+  if (!aclDialogContext) {
+    return;
+  }
+  const normalizedBindingId = String(bindingId || "").trim();
+  if (!normalizedBindingId) {
+    return;
+  }
+  await revokeAclBinding(normalizedBindingId);
+  try {
+    await refreshAclDialogBindings();
+  } catch (error) {
+    if (Number(error?.status) === 401 || Number(error?.status) === 403) {
+      closeAclDialog();
+    } else {
+      throw error;
+    }
+  }
+  await refreshViewerContext();
+  await refreshCapabilitiesForSelection();
+  await syncStateFromServer({
+    force: true,
+    bypassDeferral: true,
+    ignoreLocalActivity: true,
+    allowSameRevisionApply: true,
+  });
 }
 
 async function applyAclDialog() {
@@ -1197,53 +2074,48 @@ async function applyAclDialog() {
     return;
   }
 
-  const action = String(elements.aclActionSelect?.value || "grant");
-  if (action === "revoke") {
-    const bindingId = String(elements.aclBindingSelect?.value || "").trim();
-    if (!bindingId) {
-      window.alert("Select a binding to remove.");
-      return;
-    }
-    await revokeAclBinding(bindingId);
-  } else {
-    const subjectType = String(elements.aclSubjectType?.value || "user").trim().toLowerCase();
-    const subjectIdRaw = String(elements.aclSubjectId?.value || "").trim();
-    const role = normalizeAclRoleInput(elements.aclRoleSelect?.value || "");
-    const inherit = String(elements.aclInheritSelect?.value || "inherit") !== "direct";
+  const subjectType = String(elements.aclSubjectType?.value || "user").trim().toLowerCase();
+  const subjectIdRaw = String(elements.aclSubjectId?.value || "").trim();
+  const role = normalizeAclRoleInput(elements.aclRoleSelect?.value || "");
+  const inherit = String(elements.aclInheritSelect?.value || "inherit") !== "direct";
 
-    if (!["user", "group", "public"].includes(subjectType)) {
-      window.alert("Unsupported subject type.");
-      return;
-    }
-    if (!subjectIdRaw) {
-      window.alert("Subject is required.");
-      return;
-    }
-    if (!role) {
-      window.alert("Role is required.");
-      return;
-    }
-
-    const normalizedSubject = normalizeAclSubjectInput(`${subjectType}:${subjectIdRaw}`);
-    if (!normalizedSubject) {
-      window.alert("Invalid subject.");
-      return;
-    }
-
-    await grantAclBinding({
-      resourceType: aclDialogContext.resourceType,
-      resourceExternalId: aclDialogContext.resourceExternalId,
-      subjectType: normalizedSubject.subjectType,
-      subjectId: normalizedSubject.subjectId,
-      role,
-      inherit,
-    });
+  if (!["user", "group", "public"].includes(subjectType)) {
+    window.alert("Unsupported subject type.");
+    return;
   }
+  if (!subjectIdRaw) {
+    window.alert("Subject is required.");
+    return;
+  }
+  if (!role) {
+    window.alert("Role is required.");
+    return;
+  }
+
+  const normalizedSubject = normalizeAclSubjectInput(`${subjectType}:${subjectIdRaw}`);
+  if (!normalizedSubject) {
+    window.alert("Invalid subject.");
+    return;
+  }
+
+  await grantAclBinding({
+    resourceType: aclDialogContext.resourceType,
+    resourceExternalId: aclDialogContext.resourceExternalId,
+    subjectType: normalizedSubject.subjectType,
+    subjectId: normalizedSubject.subjectId,
+    role,
+    inherit,
+  });
 
   closeAclDialog();
   await refreshViewerContext();
   await refreshCapabilitiesForSelection();
-  await syncStateFromServer({ force: true, bypassDeferral: true });
+  await syncStateFromServer({
+    force: true,
+    bypassDeferral: true,
+    ignoreLocalActivity: true,
+    allowSameRevisionApply: true,
+  });
 }
 
 async function refreshCapabilitiesForSelection() {
@@ -1320,6 +2192,7 @@ function snapshotStateForPersistence() {
     })),
     notes: state.notes.map((note) => ({
       id: note.id,
+      shareId: note.shareId || normalizeShareId("", note.id),
       title: note.title,
       folderId: note.folderId ?? null,
       content: note.content || "",
@@ -1501,16 +2374,35 @@ function mergeNoteContent(baseContent, localContent, remoteContent, { preferLoca
   return preferLocal ? localText : remoteText;
 }
 
+function isNoteChangedAgainstBase(baseNote, candidateNote) {
+  const base = baseNote || {};
+  const candidate = candidateNote || {};
+  return (
+    String(candidate.title ?? "Untitled") !== String(base.title ?? "Untitled") ||
+    String(candidate.folderId ?? "") !== String(base.folderId ?? "") ||
+    String(candidate.deletedAt ?? "") !== String(base.deletedAt ?? "") ||
+    String(candidate.fileName ?? "") !== String(base.fileName ?? "") ||
+    String(candidate.shareId ?? "") !== String(base.shareId ?? "") ||
+    String(candidate.content ?? "") !== String(base.content ?? "")
+  );
+}
+
 function mergeConflictNote(baseNote, localNote, remoteNote) {
   const localTimestamp = getNoteTimestamp(localNote);
   const remoteTimestamp = getNoteTimestamp(remoteNote);
-  const preferLocal = localTimestamp >= remoteTimestamp;
+  const localChanged = isNoteChangedAgainstBase(baseNote, localNote);
+  const remoteChanged = isNoteChangedAgainstBase(baseNote, remoteNote);
+  const preferLocal =
+    (localChanged && !remoteChanged) ||
+    (localChanged && remoteChanged) ||
+    (!localChanged && !remoteChanged && localTimestamp >= remoteTimestamp);
 
   const baseContent = baseNote?.content || "";
   const baseTitle = baseNote?.title ?? "Untitled";
   const baseFolderId = baseNote?.folderId ?? null;
   const baseDeletedAt = baseNote?.deletedAt ?? null;
   const baseFileName = baseNote?.fileName ?? `${localNote?.id || remoteNote?.id || "note"}.md`;
+  const baseShareId = normalizeShareId(baseNote?.shareId, localNote?.id || remoteNote?.id || "");
 
   const merged = cloneConflictEntity(preferLocal ? localNote : remoteNote) || {};
   merged.id = String(localNote?.id || remoteNote?.id || merged.id || "");
@@ -1536,6 +2428,12 @@ function mergeConflictNote(baseNote, localNote, remoteNote) {
     baseFileName,
     localNote?.fileName ?? `${merged.id}.md`,
     remoteNote?.fileName ?? `${merged.id}.md`,
+    { preferLocal },
+  );
+  merged.shareId = mergeScalarConflictValue(
+    baseShareId,
+    normalizeShareId(localNote?.shareId, merged.id),
+    normalizeShareId(remoteNote?.shareId, merged.id),
     { preferLocal },
   );
   merged.content = mergeNoteContent(
@@ -1703,17 +2601,26 @@ function preventReadOnlyEditorMutation(event) {
   event.stopPropagation();
 }
 
-function commitActiveNoteContentFromEditor() {
-  if (!stateReady || ignoreEditorChange) {
+function captureEditorBeforeInput(event) {
+  const target = event?.target;
+  if (!(target instanceof Element) || !target.closest(".toastui-editor-defaultUI")) {
     return;
   }
+  lastEditorInputType = String(event?.inputType || "").trim();
+  lastEditorInputAt = Date.now();
+}
+
+function commitActiveNoteContentFromEditor({ scheduleSave = true, rerenderNotes = true } = {}) {
+  if (!stateReady || ignoreEditorChange) {
+    return true;
+  }
   if (!hasWritePermissionForActiveNote()) {
-    return;
+    return true;
   }
 
   const note = getActiveNote();
   if (!note || selectedFolderId === TRASH_FOLDER_ID || isNoteInTrash(note)) {
-    return;
+    return true;
   }
 
   let markdown = "";
@@ -1721,24 +2628,48 @@ function commitActiveNoteContentFromEditor() {
     markdown = editor.getMarkdown();
   } catch (error) {
     console.error("[tui.notes.2026] failed to read markdown from editor", error);
-    return;
+    return true;
   }
 
   if (typeof markdown !== "string") {
-    return;
+    return true;
   }
 
-  const normalizedMarkdown = normalizeRuntimeMediaUrlsInMarkdown(markdown, note.id);
+  let normalizedMarkdown = normalizeRuntimeMediaUrlsInMarkdown(markdown, note.id);
+  if (!editor.isMarkdownMode() && isLikelyTransientWysiwygMarkdown(note.content, normalizedMarkdown)) {
+    scheduleEditorContentSync(60);
+    return false;
+  }
   if (normalizedMarkdown !== note.content) {
     note.content = normalizedMarkdown;
     note.updatedAt = Date.now();
-    scheduleSaveIndicator("Saving...");
-    renderNotes();
+    if (scheduleSave) {
+      scheduleSaveIndicator("Saving...");
+    }
+    if (rerenderNotes) {
+      renderNotes();
+    }
   }
+  return true;
+}
+
+function scheduleEditorContentSync(delayMs = 70) {
+  const safeDelay = Math.max(0, Number(delayMs) || 0);
+  if (editorContentSyncTimer) {
+    clearTimeout(editorContentSyncTimer);
+    editorContentSyncTimer = null;
+  }
+  editorContentSyncTimer = setTimeout(() => {
+    editorContentSyncTimer = null;
+    commitActiveNoteContentFromEditor({ scheduleSave: false, rerenderNotes: true });
+  }, safeDelay);
 }
 
 function shouldDeferRemoteApply() {
   if (!stateReady) {
+    return true;
+  }
+  if (Date.now() - lastEditorChangeAt < LOCAL_ACTIVITY_GRACE_MS) {
     return true;
   }
   if (hasPendingLocalChanges()) {
@@ -1747,12 +2678,8 @@ function shouldDeferRemoteApply() {
   if (document.activeElement === elements.noteTitleInput) {
     return true;
   }
-
-  if (isEditorFocused()) {
-    commitActiveNoteContentFromEditor();
-    if (hasPendingLocalChanges()) {
-      return true;
-    }
+  if (isEditorFocused() && Date.now() - lastEditorChangeAt < 1000) {
+    return true;
   }
   return false;
 }
@@ -1799,12 +2726,19 @@ function applyRemoteState(payload, { refreshEditor = true, trackAsSynced = true 
 
   renderAll();
   ensureActiveNote();
+  renderRemotePresence();
 
   const activeNote = getActiveNote();
   const hasSameActiveNote =
     Boolean(previousActiveNoteId) && activeNote?.id === previousActiveNoteId;
   const activeContentChanged =
     hasSameActiveNote && (activeNote.content || "") !== previousActiveContent;
+  debugSyncLog("applyRemoteState", {
+    revision: getPayloadRevision(payload),
+    activeContentChanged,
+    refreshEditor,
+    trackAsSynced,
+  });
 
   if (refreshEditor && activeContentChanged) {
     syncActiveEditorFromState();
@@ -1816,10 +2750,14 @@ function applyRemoteState(payload, { refreshEditor = true, trackAsSynced = true 
 async function persistStateToServer(snapshot) {
   return apiRequest(STATE_API_ENDPOINT, {
     method: "PUT",
+    headers: {
+      [STATE_CLIENT_ID_HEADER]: presenceClientId,
+    },
     body: JSON.stringify({
       ...snapshot,
       _meta: {
         baseRevision: serverRevision,
+        clientId: presenceClientId,
       },
     }),
   });
@@ -1834,6 +2772,12 @@ async function flushPersistQueue() {
   try {
     do {
       persistQueued = false;
+      const ready = commitActiveNoteContentFromEditor({ scheduleSave: false, rerenderNotes: false });
+      if (!ready) {
+        persistQueued = true;
+        scheduleSaveIndicator("Saving...");
+        return;
+      }
       const snapshot = snapshotStateForPersistence();
       try {
         const response = await persistStateToServer(snapshot);
@@ -1863,6 +2807,13 @@ async function flushPersistQueue() {
     } while (persistQueued);
 
     elements.saveIndicator.textContent = "Saved";
+    if (pendingRemoteRevision > serverRevision) {
+      void syncStateFromServer({
+        force: true,
+        minRevision: pendingRemoteRevision,
+        bypassDeferral: true,
+      });
+    }
   } catch (error) {
     console.error("[tui.notes.2026] save failed", error);
     if (Number(error?.status) === 401 || Number(error?.status) === 403) {
@@ -1897,6 +2848,7 @@ async function bootstrapState() {
       ensureActiveNote();
       elements.saveIndicator.textContent = "Access denied";
       startRemoteEventsStream();
+      startPresenceHeartbeatLoop();
       return;
     }
 
@@ -1913,6 +2865,7 @@ async function bootstrapState() {
   const requestedNoteId = getRequestedNoteIdFromUrl();
   if (requestedNoteId) {
     setActiveNote(requestedNoteId);
+    setMobilePanel("editor");
   }
   await refreshCapabilitiesForSelection();
   if (authMode !== "off" && !hasWritePermissionForActiveNote()) {
@@ -1922,6 +2875,8 @@ async function bootstrapState() {
   }
   startRemoteSyncLoop();
   startRemoteEventsStream();
+  startPresenceHeartbeatLoop();
+  schedulePresenceHeartbeat();
 }
 
 function startRemoteSyncLoop() {
@@ -1973,7 +2928,34 @@ function handleRemoteEventPayload(rawData, eventName = "") {
     void refreshCapabilitiesForSelection().catch((error) => {
       console.error("[tui.notes.2026] failed to refresh capabilities after permission update", error);
     });
-    void syncStateFromServer({ force: true, bypassDeferral: true });
+    void syncStateFromServer({
+      force: true,
+      bypassDeferral: true,
+      ignoreLocalActivity: true,
+      allowSameRevisionApply: true,
+    });
+    return;
+  }
+
+  if (eventName === "presence-updated") {
+    const noteId = String(payload?.noteId || "").trim();
+    const participants = Array.isArray(payload?.participants) ? payload.participants : [];
+    if (!noteId) {
+      return;
+    }
+    const payloadMaxUpdatedAt = participants.reduce((maxValue, participant) => {
+      const updatedAt = Number(participant?.updatedAt) || 0;
+      return updatedAt > maxValue ? updatedAt : maxValue;
+    }, 0);
+    const knownMaxUpdatedAt = Number(remotePresenceMaxUpdatedAtByNoteId.get(noteId)) || 0;
+    if (payloadMaxUpdatedAt > 0 && payloadMaxUpdatedAt < knownMaxUpdatedAt) {
+      return;
+    }
+    if (payloadMaxUpdatedAt > 0) {
+      remotePresenceMaxUpdatedAtByNoteId.set(noteId, payloadMaxUpdatedAt);
+    }
+    remotePresenceByNoteId.set(noteId, participants);
+    renderRemotePresence();
     return;
   }
 
@@ -1982,12 +2964,17 @@ function handleRemoteEventPayload(rawData, eventName = "") {
     return;
   }
 
+  const sourceClientId = String(payload?.clientId || "").trim();
+  if (sourceClientId && sourceClientId === presenceClientId) {
+    return;
+  }
+
   if (revision <= serverRevision) {
     return;
   }
 
   pendingRemoteRevision = Math.max(pendingRemoteRevision, revision);
-  void syncStateFromServer({ force: true, minRevision: pendingRemoteRevision });
+  void syncStateFromServer({ force: true, minRevision: pendingRemoteRevision, bypassDeferral: true });
 }
 
 function startRemoteEventsStream() {
@@ -1999,7 +2986,9 @@ function startRemoteEventsStream() {
   }
 
   try {
-    const source = new EventSource(EVENTS_API_ENDPOINT);
+    const eventsUrl = new URL(EVENTS_API_ENDPOINT, window.location.origin);
+    eventsUrl.searchParams.set("clientId", presenceClientId);
+    const source = new EventSource(eventsUrl.toString());
     remoteEventsSource = source;
 
     source.addEventListener("connected", (event) => {
@@ -2010,6 +2999,9 @@ function startRemoteEventsStream() {
     });
     source.addEventListener("permissions-changed", (event) => {
       handleRemoteEventPayload(event?.data, "permissions-changed");
+    });
+    source.addEventListener("presence-updated", (event) => {
+      handleRemoteEventPayload(event?.data, "presence-updated");
     });
     source.onerror = () => {
       if (remoteEventsSource === source) {
@@ -2023,7 +3015,13 @@ function startRemoteEventsStream() {
   }
 }
 
-async function syncStateFromServer({ force = false, minRevision = 0, bypassDeferral = false } = {}) {
+async function syncStateFromServer({
+  force = false,
+  minRevision = 0,
+  bypassDeferral = false,
+  ignoreLocalActivity = false,
+  allowSameRevisionApply = false,
+} = {}) {
   if (!stateReady) {
     return;
   }
@@ -2033,7 +3031,31 @@ async function syncStateFromServer({ force = false, minRevision = 0, bypassDefer
   if (!force && document.hidden) {
     return;
   }
-  if (!bypassDeferral && shouldDeferRemoteApply()) {
+  const hasLocalActivity = () => {
+    if (ignoreLocalActivity) {
+      return false;
+    }
+    if (bypassDeferral) {
+      if (hasPendingLocalChanges() || document.activeElement === elements.noteTitleInput) {
+        return true;
+      }
+      return Date.now() - lastEditorChangeAt < LOCAL_ACTIVITY_GRACE_MS;
+    }
+    return shouldDeferRemoteApply();
+  };
+
+  const localActivityDetected = hasLocalActivity();
+  if (localActivityDetected && !ignoreLocalActivity) {
+    const requestedMin = Number.isSafeInteger(Number(minRevision)) ? Number(minRevision) : 0;
+    if (requestedMin > pendingRemoteRevision) {
+      pendingRemoteRevision = requestedMin;
+    }
+    debugSyncLog("defer sync (local activity before fetch)", {
+      force,
+      minRevision,
+      pendingRemoteRevision,
+      ignoreLocalActivity,
+    });
     return;
   }
 
@@ -2045,16 +3067,24 @@ async function syncStateFromServer({ force = false, minRevision = 0, bypassDefer
       Number.isSafeInteger(Number(minRevision)) ? Number(minRevision) : 0,
       pendingRemoteRevision,
     );
-    if (remoteRevision <= serverRevision && requiredRevision <= serverRevision) {
+    if (!allowSameRevisionApply && remoteRevision <= serverRevision && requiredRevision <= serverRevision) {
       updateServerRevision(remoteState);
       return;
     }
-    if (remoteRevision <= serverRevision && requiredRevision > serverRevision) {
+    if (!allowSameRevisionApply && remoteRevision <= serverRevision && requiredRevision > serverRevision) {
       return;
     }
-    if (!bypassDeferral && shouldDeferRemoteApply()) {
+    if (hasLocalActivity()) {
+      pendingRemoteRevision = Math.max(pendingRemoteRevision, remoteRevision, requiredRevision);
+      debugSyncLog("defer sync (local activity after fetch)", {
+        remoteRevision,
+        serverRevision,
+        pendingRemoteRevision,
+      });
       return;
     }
+
+    debugSyncLog("apply fetched remote state", { remoteRevision, serverRevision });
     applyRemoteState(remoteState);
     if (remoteRevision >= pendingRemoteRevision) {
       pendingRemoteRevision = 0;
@@ -2083,6 +3113,7 @@ function flushStateWithBeacon() {
       ...snapshotStateForPersistence(),
       _meta: {
         baseRevision: serverRevision,
+        clientId: presenceClientId,
       },
     });
     if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
@@ -2178,6 +3209,7 @@ function ensureValidStateShape() {
 
     normalizedNotes.push({
       id,
+      shareId: normalizeShareId(rawNote.shareId, id),
       title,
       folderId,
       content: String(rawNote.content || ""),
@@ -2229,6 +3261,11 @@ function persistExpandedFolders() {
 }
 
 function saveState() {
+  const ready = commitActiveNoteContentFromEditor({ scheduleSave: false, rerenderNotes: false });
+  if (!ready) {
+    scheduleSaveIndicator("Saving...");
+    return;
+  }
   persistExpandedFolders();
   if (persistInFlight) {
     persistQueued = true;
@@ -2459,6 +3496,8 @@ function initEditor() {
   if (typeof editor.on === "function") {
     editor.on("changeMode", () => {
       applyAccessUiState();
+      renderRemotePresence();
+      schedulePresenceHeartbeat();
     });
   }
 }
@@ -2530,6 +3569,7 @@ function renderAll() {
   renderFolders();
   renderNotes();
   renderEditorHeader();
+  applyMobilePanelView();
 }
 
 function renderFolders() {
@@ -2668,6 +3708,8 @@ function clearEditorSelection() {
   resetEditorUndoRedoHistory();
   ignoreEditorChange = false;
   renderEditorHeader();
+  renderRemotePresence();
+  schedulePresenceHeartbeat();
   void refreshCapabilitiesForSelection();
 }
 
@@ -2729,6 +3771,8 @@ function setActiveNote(noteId) {
   }
   renderNotes();
   renderEditorHeader();
+  renderRemotePresence();
+  schedulePresenceHeartbeat();
   void refreshCapabilitiesForSelection();
 }
 
@@ -2774,6 +3818,9 @@ function selectFolder(folderId) {
 
   renderAll();
   ensureActiveNote();
+  setMobilePanel("notes");
+  renderRemotePresence();
+  schedulePresenceHeartbeat();
   void refreshCapabilitiesForSelection();
 }
 
@@ -2787,7 +3834,14 @@ function hasFolderNameInParent(name, parentId, excludeFolderId = null) {
   );
 }
 
+function isProtectedHomeFolder(folderId) {
+  return Boolean(viewerHomeFolderId) && String(folderId) === String(viewerHomeFolderId);
+}
+
 function getSelectedParentFolderId() {
+  if (selectedFolderId === ROOT_FOLDER_ID || selectedFolderId === TRASH_FOLDER_ID) {
+    return null;
+  }
   return folderExists(selectedFolderId) ? selectedFolderId : null;
 }
 
@@ -2834,6 +3888,10 @@ function renameFolder(folderId) {
   if (!stateReady) {
     return;
   }
+  if (isProtectedHomeFolder(folderId)) {
+    window.alert("Home folder name cannot be changed.");
+    return;
+  }
   if (authMode !== "off" && !selectedFolderCapabilities.canWrite && selectedFolderId === folderId) {
     window.alert("You do not have permission to rename this folder.");
     return;
@@ -2867,6 +3925,10 @@ function renameFolder(folderId) {
 
 function deleteFolder(folderId) {
   if (!stateReady) {
+    return;
+  }
+  if (isProtectedHomeFolder(folderId)) {
+    window.alert("Home folder cannot be deleted.");
     return;
   }
   if (authMode !== "off" && !selectedFolderCapabilities.canWrite && selectedFolderId === folderId) {
@@ -3028,6 +4090,7 @@ function createNote() {
   const now = Date.now();
   const note = {
     id: createId(),
+    shareId: createOpaqueId(24),
     title,
     folderId,
     content: `# ${title}\n`,
@@ -3040,6 +4103,7 @@ function createNote() {
   saveState();
   renderAll();
   setActiveNote(note.id);
+  setMobilePanel("editor");
   elements.noteTitleInput.focus();
   elements.noteTitleInput.select();
 }
@@ -3187,6 +4251,10 @@ function moveFolder(folderId, targetParentId) {
   if (!stateReady) {
     return;
   }
+  if (isProtectedHomeFolder(folderId)) {
+    window.alert("Home folder cannot be moved.");
+    return;
+  }
   if (authMode !== "off" && !selectedFolderCapabilities.canWrite && selectedFolderId === folderId) {
     window.alert("You do not have permission to move this folder.");
     return;
@@ -3247,27 +4315,16 @@ function handleEditorChange() {
     return;
   }
 
-  let markdown = editor.getMarkdown();
-  const normalizedMarkdown = normalizeRuntimeMediaUrlsInMarkdown(markdown, note.id);
-
-  if (normalizedMarkdown !== markdown && editor.isMarkdownMode()) {
-    ignoreEditorChange = true;
-    try {
-      editor.setMarkdown(normalizedMarkdown, false, false, true);
-    } catch (error) {
-      console.error("[tui.notes.2026] failed to normalize runtime media url", error);
-    } finally {
-      ignoreEditorChange = false;
-    }
-    markdown = normalizedMarkdown;
-  } else {
-    markdown = normalizedMarkdown;
-  }
-
-  note.content = markdown;
-  note.updatedAt = Date.now();
+  lastEditorChangeAt = Date.now();
+  debugSyncLog("editor change", {
+    noteId: note.id,
+    mode: getEditorModeName(),
+    updatedAt: lastEditorChangeAt,
+  });
+  scheduleEditorContentSync(editor.isMarkdownMode() ? 0 : 70);
   scheduleSaveIndicator("Saving...");
   renderNotes();
+  renderRemotePresence();
 }
 
 function formatUpdatedAt(timestamp) {
@@ -3513,11 +4570,50 @@ function wireEvents() {
   elements.newFolderBtn.addEventListener("click", createFolder);
   elements.toggleFoldersBtn.addEventListener("click", toggleFoldersPanel);
   elements.newNoteBtn.addEventListener("click", createNote);
+  elements.notesBackBtn?.addEventListener("click", () => {
+    setMobilePanel("folders");
+  });
+  elements.editorBackBtn?.addEventListener("click", () => {
+    commitActiveNoteTitleFromInput();
+    commitActiveNoteContentFromEditor();
+    setMobilePanel("notes");
+  });
+  app.addEventListener("beforeinput", captureEditorBeforeInput, true);
   app.addEventListener("keydown", preventReadOnlyEditorMutation, true);
   app.addEventListener("beforeinput", preventReadOnlyEditorMutation, true);
   app.addEventListener("paste", preventReadOnlyEditorMutation, true);
   app.addEventListener("drop", preventReadOnlyEditorMutation, true);
   app.addEventListener("cut", preventReadOnlyEditorMutation, true);
+  app.addEventListener("keyup", handleLocalCursorActivity, true);
+  app.addEventListener("mouseup", handleLocalCursorActivity, true);
+  app.addEventListener("click", handleLocalCursorActivity, true);
+  app.addEventListener("scroll", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    if (
+      target.closest(".toastui-editor-md-container") ||
+      target.closest(".toastui-editor-ww-container")
+    ) {
+      renderRemotePresence();
+    }
+  }, true);
+
+  document.addEventListener("selectionchange", () => {
+    if (!stateReady || !editor || editor.isMarkdownMode()) {
+      return;
+    }
+    const { wysiwygSurface } = getEditorSurfaceElements();
+    const selection = window.getSelection?.();
+    if (!selection || selection.rangeCount < 1) {
+      return;
+    }
+    if (!wysiwygSurface || !wysiwygSurface.contains(selection.anchorNode)) {
+      return;
+    }
+    handleLocalCursorActivity();
+  });
 
   elements.foldersResizer.addEventListener("mousedown", (event) => {
     startResize("folders", event);
@@ -3575,6 +4671,7 @@ function wireEvents() {
     }
 
     setActiveNote(noteId);
+    setMobilePanel("editor");
   });
 
   elements.noteTitleInput.addEventListener("blur", () => {
@@ -3613,8 +4710,9 @@ function wireEvents() {
     const canMutateFolder =
       authMode === "off" ||
       (folderId === selectedFolderId ? selectedFolderCapabilities.canWrite : workspaceCapabilities.canWrite);
+    const canChangeFolderShape = canMutateFolder && !isProtectedHomeFolder(folderId);
     const folderMenuItems = [];
-    if (canMutateFolder) {
+    if (canChangeFolderShape) {
       folderMenuItems.push(
         { label: "Rename", action: "rename-folder" },
         { label: "Delete", action: "delete-folder", danger: true },
@@ -3702,9 +4800,6 @@ function wireEvents() {
     hideContextMenu();
   });
 
-  elements.aclActionSelect.addEventListener("change", () => {
-    updateAclDialogSections();
-  });
   elements.aclCancelBtn.addEventListener("click", () => {
     closeAclDialog();
   });
@@ -3713,6 +4808,25 @@ function wireEvents() {
       console.error("[tui.notes.2026] failed to apply ACL update", error);
       window.alert(error?.message || "Failed to update access.");
     });
+  });
+  elements.aclCurrentAccessList?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLButtonElement) || !target.classList.contains("acl-access-revoke-btn")) {
+      return;
+    }
+    const bindingId = String(target.getAttribute("data-binding-id") || "").trim();
+    if (!bindingId || target.disabled) {
+      return;
+    }
+    target.disabled = true;
+    void revokeAclBindingFromDialog(bindingId)
+      .catch((error) => {
+        console.error("[tui.notes.2026] failed to revoke ACL binding", error);
+        window.alert(error?.message || "Failed to revoke access.");
+      })
+      .finally(() => {
+        target.disabled = false;
+      });
   });
   elements.aclModal.addEventListener("click", (event) => {
     const target = event.target;
@@ -3742,6 +4856,7 @@ function wireEvents() {
   window.addEventListener("resize", () => {
     hideContextMenu();
     applyLayoutPrefs(false);
+    renderRemotePresence();
   });
 
   document.addEventListener("visibilitychange", () => {
@@ -3749,6 +4864,7 @@ function wireEvents() {
       void refreshViewerContext().catch(() => {});
       void refreshCapabilitiesForSelection().catch(() => {});
       void syncStateFromServer({ force: true, bypassDeferral: true });
+      schedulePresenceHeartbeat();
     }
   });
 
@@ -3756,6 +4872,7 @@ function wireEvents() {
     void refreshViewerContext().catch(() => {});
     void refreshCapabilitiesForSelection().catch(() => {});
     void syncStateFromServer({ force: true, bypassDeferral: true });
+    schedulePresenceHeartbeat();
   });
 
   elements.folderList.addEventListener("dragstart", (event) => {
@@ -3844,6 +4961,7 @@ function wireEvents() {
       clearInterval(remoteSyncTimer);
       remoteSyncTimer = null;
     }
+    stopPresenceHeartbeatLoop();
     stopRemoteEventsStream();
     stopResize();
     persistLayoutPrefs();

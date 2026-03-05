@@ -184,6 +184,10 @@ body.dark.is-resizing .panel-resizer::before {
   will-change: transform;
 }
 
+.mobile-nav-btn {
+  display: none;
+}
+
 .ui-icon {
   display: inline-flex;
   width: 16px;
@@ -482,6 +486,7 @@ body.dark.is-resizing .panel-resizer::before {
 .toastui-editor-defaultUI {
   height: 100%;
   border: 0;
+  position: relative;
 }
 
 /* Markdown paste uses an internal hidden textarea. Keep it in local coordinates
@@ -490,6 +495,44 @@ body.dark.is-resizing .panel-resizer::before {
   position: absolute !important;
   left: 0 !important;
   top: 0 !important;
+}
+
+.remote-presence-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 80;
+  overflow: hidden;
+}
+
+.remote-cursor-marker {
+  position: absolute;
+  transform: translate(-1px, 0);
+}
+
+.remote-cursor-caret {
+  display: block;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--cursor-color, #4d8dff);
+}
+
+.remote-cursor-label {
+  position: absolute;
+  left: 0;
+  top: -18px;
+  transform: translateX(-2px);
+  font-size: 10px;
+  line-height: 1;
+  color: #fff;
+  background: var(--cursor-color, #4d8dff);
+  border-radius: 6px;
+  padding: 3px 5px;
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.22);
 }
 
 .context-menu {
@@ -580,6 +623,90 @@ body.dark.is-resizing .panel-resizer::before {
   margin: 0;
   font-size: 13px;
   color: #6f7a91;
+}
+
+.acl-current-access {
+  display: grid;
+  gap: 6px;
+}
+
+.acl-section-label {
+  font-size: 12px;
+  color: #5f6a84;
+  font-weight: 600;
+}
+
+.acl-current-access-list {
+  border: 1px solid #d8dfec;
+  border-radius: 9px;
+  padding: 6px;
+  max-height: 180px;
+  overflow: auto;
+  display: grid;
+  gap: 4px;
+  background: #fcfdff;
+}
+
+.acl-access-empty {
+  font-size: 12px;
+  color: #79839a;
+  padding: 6px;
+}
+
+.acl-access-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+  border-radius: 7px;
+  padding: 6px 8px;
+  background: #f4f7ff;
+}
+
+.acl-access-subject {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #1a2437;
+}
+
+.acl-access-role {
+  font-size: 11px;
+  border-radius: 999px;
+  background: #dde9ff;
+  color: #2459b8;
+  padding: 2px 8px;
+  font-weight: 650;
+  text-transform: lowercase;
+}
+
+.acl-access-scope {
+  font-size: 11px;
+  color: #64728f;
+}
+
+.acl-access-revoke-btn {
+  border: 1px solid #d1d9ea;
+  background: #fff;
+  color: #1f3558;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 600;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.acl-access-revoke-btn:hover:not(:disabled) {
+  border-color: #8bb0ff;
+  background: #eaf2ff;
+}
+
+.acl-access-revoke-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .acl-field {
@@ -747,8 +874,43 @@ body.dark .acl-modal-actions {
 }
 
 body.dark .acl-resource-label,
-body.dark .acl-field span {
+body.dark .acl-field span,
+body.dark .acl-section-label {
   color: #98a6c8;
+}
+
+body.dark .acl-current-access-list {
+  border-color: #3a4763;
+  background: #1f2735;
+}
+
+body.dark .acl-access-row {
+  background: #273247;
+}
+
+body.dark .acl-access-subject {
+  color: #dce5fb;
+}
+
+body.dark .acl-access-role {
+  background: #375a9e;
+  color: #eef4ff;
+}
+
+body.dark .acl-access-scope,
+body.dark .acl-access-empty {
+  color: #9fb0d0;
+}
+
+body.dark .acl-access-revoke-btn {
+  border-color: #445677;
+  background: #243149;
+  color: #dbe8ff;
+}
+
+body.dark .acl-access-revoke-btn:hover:not(:disabled) {
+  border-color: #6f9fff;
+  background: #2e4268;
 }
 
 body.dark .acl-field input,
@@ -960,19 +1122,52 @@ body.dark .acl-modal-actions button:last-child {
 
 @media (max-width: 860px) {
   .app-shell {
-    flex-direction: column;
+    flex-direction: row;
   }
 
-  .panel {
+  .panel,
+  .editor-pane {
     width: 100%;
     min-width: 0;
+    min-height: 0;
+    height: 100%;
     border-right: 0;
-    border-bottom: 1px solid #d9dde7;
-    max-height: 200px;
+    border-bottom: 0;
+    max-height: none;
+  }
+
+  .folders-panel,
+  .notes-panel,
+  .editor-pane {
+    display: none;
+  }
+
+  .app-shell.mobile-view-folders .folders-panel {
+    display: flex;
+  }
+
+  .app-shell.mobile-view-notes .notes-panel {
+    display: flex;
+  }
+
+  .app-shell.mobile-view-editor .editor-pane {
+    display: flex;
   }
 
   .panel-resizer {
     display: none !important;
+  }
+
+  .mobile-nav-btn {
+    display: inline-flex;
+  }
+
+  #toggle-folders-btn {
+    display: none !important;
+  }
+
+  .editor-header-actions {
+    margin-right: 0;
   }
 
   .theme-mode-label {

@@ -37,6 +37,7 @@ services:
       TUI_NOTES_API_PORT: 8787
       TUI_NOTES_SERVE_DIST: "1"
       TUI_NOTES_AUTH_MODE: enforce
+      TUI_NOTES_DEBUG_SYNC: "1"
       TUI_NOTES_BOOTSTRAP_OWNER_EMAIL: alice@example.com
       TUI_NOTES_ROOT_DIR: /notes-data
     volumes:
