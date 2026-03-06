@@ -606,6 +606,14 @@ function isDeleteLikeInputType(inputType) {
   );
 }
 
+function isInsertLikeInputType(inputType) {
+  const type = String(inputType || "").trim().toLowerCase();
+  if (!type) {
+    return false;
+  }
+  return type.startsWith("insert");
+}
+
 function countListItems(markdown) {
   const source = String(markdown || "");
   if (!source) {
@@ -624,7 +632,10 @@ function isLikelyTransientWysiwygMarkdown(currentMarkdown, nextMarkdown) {
   if (!currentText || !nextText) {
     return false;
   }
-  const inputType = getRecentEditorInputType();
+  const inputType = getRecentEditorInputType(1200);
+  if (!isInsertLikeInputType(inputType)) {
+    return false;
+  }
   if (isDeleteLikeInputType(inputType)) {
     return false;
   }
