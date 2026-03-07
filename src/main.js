@@ -35,6 +35,7 @@ const MEDIA_UPLOAD_ENDPOINT = "/api/media/upload";
 const MEDIA_FILE_ENDPOINT = "/api/media/file";
 const NOTE_LINK_QUERY_PARAM = "ref";
 const LEGACY_NOTE_LINK_QUERY_PARAM = "note";
+const FOLDER_LINK_QUERY_PARAM = "folder";
 const THEME_STORAGE_KEY = "themeMode";
 const LAYOUT_STORAGE_KEY = "layoutPrefs";
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -44,7 +45,6 @@ const FOLDERS_PANEL_MIN_WIDTH = 220;
 const NOTES_PANEL_MIN_WIDTH = 240;
 const MIN_EDITOR_WIDTH = 520;
 const PANEL_RESIZER_WIDTH = 6;
-const DESKTOP_BREAKPOINT = 860;
 const NOTE_TITLE_SUFFIX_LENGTH = 6;
 const REMOTE_SYNC_INTERVAL_MS = 1500;
 const REMOTE_EVENTS_RECONNECT_MS = 1500;
@@ -72,6 +72,10 @@ const VIDEO_EXTENSIONS = new Set([
   "avi",
   "mkv",
 ]);
+const SWIPE_OPEN_THRESHOLD_PX = 48;
+const SWIPE_CLOSE_THRESHOLD_PX = 28;
+const SWIPE_INTENT_MIN_DELTA = 8;
+const SWIPE_OPEN_DEFAULT_WIDTH = 208;
 
 const ICONS = {
   folder:
@@ -88,6 +92,18 @@ const ICONS = {
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h18v16H3z"></path><path d="M9 4v16"></path><path d="M14 12h5"></path><path d="M16 9l-3 3 3 3"></path></svg>',
   back:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"></path></svg>',
+  chevronRight:
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4l6 6-6 6"></path></svg>',
+  share:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"></path><path d="m7 9 5-5 5 5"></path><path d="M20 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-5"></path></svg>',
+  rename:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>',
+  move:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8h11"></path><path d="M5 12h14"></path><path d="M5 16h9"></path><path d="m17 5 4 3-4 3"></path></svg>',
+  delete:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"></path><path d="M19 6l-1 13a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path></svg>',
+  restore:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"></path><path d="M20 20v-6a5 5 0 0 0-5-5H4"></path></svg>',
 };
 
 const chartPluginOptions = {
@@ -143,6 +159,16 @@ app.innerHTML = `
           </button>
         </div>
       </div>
+      <div id="move-picker-bar" class="move-picker-bar" hidden>
+        <div class="move-picker-label-wrap">
+          <span class="move-picker-title">Move to folder</span>
+          <span id="move-picker-label" class="move-picker-label"></span>
+        </div>
+        <div class="move-picker-actions">
+          <button id="move-picker-new-folder-btn" type="button">New folder</button>
+          <button id="move-picker-cancel-btn" type="button">Cancel</button>
+        </div>
+      </div>
       <div id="folder-list" class="panel-scroll folder-list-root"></div>
       <div class="panel-footer">
         <button id="trash-btn" class="folder-row folder-row-trash" data-drop-folder-id="${TRASH_FOLDER_ID}" type="button">
@@ -166,6 +192,9 @@ app.innerHTML = `
           <span id="notes-title" class="panel-title">All Notes</span>
         </div>
         <div id="notes-header-actions" class="panel-header-actions">
+          <button id="notes-new-folder-btn" class="panel-icon-btn mobile-only-action" title="New folder" aria-label="New folder" type="button">
+            <span class="ui-icon">${ICONS.newFolder}</span>
+          </button>
           <button id="new-note-btn" class="panel-icon-btn" title="New note" aria-label="New note" type="button">
             <span class="ui-icon">${ICONS.newNote}</span>
           </button>
@@ -201,6 +230,23 @@ app.innerHTML = `
     </div>
   </div>
   <div id="context-menu" class="context-menu" aria-hidden="true"></div>
+  <div id="share-sheet" class="share-sheet" aria-hidden="true">
+    <div class="share-sheet-backdrop" data-action="close-share-sheet"></div>
+    <div class="share-sheet-dialog" role="dialog" aria-modal="true" aria-labelledby="share-sheet-title">
+      <div class="share-sheet-header">
+        <h3 id="share-sheet-title">Share</h3>
+        <p id="share-sheet-subtitle" class="share-sheet-subtitle"></p>
+      </div>
+      <div class="share-sheet-actions">
+        <button class="share-sheet-btn" data-share-action="copy-link" type="button">Copy link</button>
+        <button class="share-sheet-btn" data-share-action="export-markdown" type="button">Export Markdown</button>
+        <button class="share-sheet-btn" data-share-action="export-html" type="button">Export HTML</button>
+      </div>
+      <div class="share-sheet-footer">
+        <button class="share-sheet-btn is-cancel" data-share-action="cancel" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
   <div id="acl-modal" class="acl-modal" aria-hidden="true">
     <div class="acl-modal-backdrop" data-action="close-acl-modal"></div>
     <div class="acl-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="acl-modal-title">
@@ -261,8 +307,14 @@ const elements = {
   notesBackBtn: document.querySelector("#notes-back-btn"),
   notesTitle: document.querySelector("#notes-title"),
   noteList: document.querySelector("#note-list"),
+  notesNewFolderBtn: document.querySelector("#notes-new-folder-btn"),
   notesResizer: document.querySelector("#notes-resizer"),
+  editorPane: document.querySelector(".editor-pane"),
   newFolderBtn: document.querySelector("#new-folder-btn"),
+  movePickerBar: document.querySelector("#move-picker-bar"),
+  movePickerLabel: document.querySelector("#move-picker-label"),
+  movePickerNewFolderBtn: document.querySelector("#move-picker-new-folder-btn"),
+  movePickerCancelBtn: document.querySelector("#move-picker-cancel-btn"),
   toggleFoldersBtn: document.querySelector("#toggle-folders-btn"),
   editorBackBtn: document.querySelector("#editor-back-btn"),
   newNoteBtn: document.querySelector("#new-note-btn"),
@@ -271,6 +323,8 @@ const elements = {
   themeModeControl: document.querySelector("#theme-mode-control"),
   themeModeSelect: document.querySelector("#theme-mode-select"),
   contextMenu: document.querySelector("#context-menu"),
+  shareSheet: document.querySelector("#share-sheet"),
+  shareSheetSubtitle: document.querySelector("#share-sheet-subtitle"),
   aclModal: document.querySelector("#acl-modal"),
   aclResourceLabel: document.querySelector("#acl-resource-label"),
   aclCurrentAccessList: document.querySelector("#acl-current-access-list"),
@@ -298,6 +352,7 @@ let saveTimer = null;
 let currentThemeMode = resolveInitialThemeMode();
 const layoutPrefs = resolveInitialLayoutPrefs();
 let mobileActivePanel = "notes";
+let lastResponsivePanelCount = null;
 let dragState = null;
 let dragSourceEl = null;
 let dropTargetEl = null;
@@ -350,6 +405,13 @@ let lastKnownPresenceSelection = null;
 let editorContentSyncTimer = null;
 let lastEditorInputType = "";
 let lastEditorInputAt = 0;
+let openedSwipeRow = null;
+let swipeGestureState = null;
+let suppressListClickUntil = 0;
+let movePickerContext = null;
+let shareSheetContext = null;
+let scratchExportEditor = null;
+let scratchExportHost = null;
 
 const DEBUG_SYNC = (() => {
   try {
@@ -734,11 +796,11 @@ function alertMediaUploadError(error) {
 }
 
 function isDesktopLayout() {
-  return window.innerWidth > DESKTOP_BREAKPOINT;
+  return !isSinglePanelLayout();
 }
 
 function isMobileLayout() {
-  return !isDesktopLayout();
+  return isSinglePanelLayout();
 }
 
 function normalizeMobilePanel(panel) {
@@ -748,11 +810,85 @@ function normalizeMobilePanel(panel) {
   return "notes";
 }
 
-function getDefaultMobilePanel() {
+function hasActiveEditableNote() {
   const note = getActiveNote();
-  const hasEditableActiveNote =
-    Boolean(note) && selectedFolderId !== TRASH_FOLDER_ID && !isNoteInTrash(note);
-  return hasEditableActiveNote ? "editor" : "notes";
+  return Boolean(note) && selectedFolderId !== TRASH_FOLDER_ID && !isNoteInTrash(note);
+}
+
+function getPanelPriorityOrder() {
+  const priorities = [];
+  if (movePickerContext) {
+    priorities.push("folders");
+    priorities.push("notes");
+    if (hasActiveEditableNote()) {
+      priorities.push("editor");
+    }
+    return priorities;
+  }
+  if (hasActiveEditableNote()) {
+    priorities.push("editor", "notes");
+    if (!layoutPrefs.foldersCollapsed) {
+      priorities.push("folders");
+    }
+    return priorities;
+  }
+
+  priorities.push("notes");
+  if (!layoutPrefs.foldersCollapsed) {
+    priorities.push("folders");
+  }
+  return priorities;
+}
+
+function getPanelMinWidth(panelId) {
+  if (panelId === "folders") {
+    return FOLDERS_PANEL_MIN_WIDTH;
+  }
+  if (panelId === "notes") {
+    return NOTES_PANEL_MIN_WIDTH;
+  }
+  if (panelId === "editor") {
+    return MIN_EDITOR_WIDTH;
+  }
+  return NOTES_PANEL_MIN_WIDTH;
+}
+
+function getMinimumWidthForPanels(panelIds) {
+  const normalized = Array.isArray(panelIds) ? panelIds.filter(Boolean) : [];
+  if (!normalized.length) {
+    return 0;
+  }
+  const panelsWidth = normalized.reduce((total, panelId) => total + getPanelMinWidth(panelId), 0);
+  const resizersWidth = Math.max(0, normalized.length - 1) * PANEL_RESIZER_WIDTH;
+  return panelsWidth + resizersWidth;
+}
+
+function isSinglePanelLayout(priorities = getPanelPriorityOrder()) {
+  const ordered = Array.isArray(priorities) ? priorities.filter(Boolean) : [];
+  if (ordered.length < 2) {
+    return false;
+  }
+  const minWidthForTwoPanels = getMinimumWidthForPanels(ordered.slice(0, 2));
+  return window.innerWidth < minWidthForTwoPanels;
+}
+
+function getResponsivePanelCount(priorities) {
+  if (!priorities.length) {
+    return 1;
+  }
+  if (isSinglePanelLayout(priorities)) {
+    return 1;
+  }
+
+  if (priorities.length >= 3) {
+    const minWidthForThreePanels = getMinimumWidthForPanels(priorities.slice(0, 3));
+    if (window.innerWidth < minWidthForThreePanels) {
+      return 2;
+    }
+    return 3;
+  }
+
+  return Math.min(2, priorities.length);
 }
 
 function applyMobilePanelView(preferredPanel = mobileActivePanel) {
@@ -761,17 +897,51 @@ function applyMobilePanelView(preferredPanel = mobileActivePanel) {
   }
 
   elements.appShell.classList.remove("mobile-view-folders", "mobile-view-notes", "mobile-view-editor");
-
-  if (!isMobileLayout()) {
-    return;
+  const priorities = getPanelPriorityOrder();
+  const panelCount = getResponsivePanelCount(priorities);
+  const isNarrowSinglePanel = panelCount === 1 && isSinglePanelLayout(priorities);
+  elements.appShell.classList.toggle("is-single-panel", isNarrowSinglePanel);
+  if (!isNarrowSinglePanel) {
+    closeOpenedSwipeRow();
+  }
+  let visiblePanels = priorities.slice(0, panelCount);
+  if (!visiblePanels.length) {
+    visiblePanels = ["notes"];
   }
 
-  const requestedPanel = normalizeMobilePanel(preferredPanel);
-  const fallbackPanel = getDefaultMobilePanel();
-  const nextPanel = requestedPanel === "editor" && fallbackPanel !== "editor" ? "notes" : requestedPanel;
+  if (isNarrowSinglePanel) {
+    const availablePanels = priorities.length ? priorities : ["notes"];
+    let nextPanel = normalizeMobilePanel(preferredPanel);
+    if (lastResponsivePanelCount !== 1) {
+      nextPanel = availablePanels[0];
+    }
+    if (!availablePanels.includes(nextPanel)) {
+      nextPanel = availablePanels[0];
+    }
+    mobileActivePanel = nextPanel;
+    visiblePanels = [nextPanel];
+    elements.appShell.classList.add(`mobile-view-${nextPanel}`);
+  } else if (!priorities.includes(mobileActivePanel)) {
+    mobileActivePanel = priorities[0];
+  }
 
-  mobileActivePanel = nextPanel;
-  elements.appShell.classList.add(`mobile-view-${nextPanel}`);
+  const showFolders = visiblePanels.includes("folders");
+  const showNotes = visiblePanels.includes("notes");
+  const showEditor = visiblePanels.includes("editor");
+
+  if (elements.foldersPanel instanceof HTMLElement) {
+    elements.foldersPanel.hidden = !showFolders;
+  }
+  if (elements.notesPanel instanceof HTMLElement) {
+    elements.notesPanel.hidden = !showNotes;
+  }
+  if (elements.editorPane instanceof HTMLElement) {
+    elements.editorPane.hidden = !showEditor;
+  }
+
+  elements.foldersResizer.hidden = !(showFolders && showNotes);
+  elements.notesResizer.hidden = !(showNotes && showEditor);
+  lastResponsivePanelCount = panelCount;
 }
 
 function setMobilePanel(panel) {
@@ -1151,6 +1321,7 @@ function updateNoteLinkInUrl(noteId) {
       const opaqueId = normalizeShareId(note?.shareId, note?.id || noteId);
       url.searchParams.set(NOTE_LINK_QUERY_PARAM, opaqueId);
       url.searchParams.delete(LEGACY_NOTE_LINK_QUERY_PARAM);
+      url.searchParams.delete(FOLDER_LINK_QUERY_PARAM);
     } else {
       url.searchParams.delete(NOTE_LINK_QUERY_PARAM);
       url.searchParams.delete(LEGACY_NOTE_LINK_QUERY_PARAM);
@@ -1168,6 +1339,7 @@ function buildShareLinkForNote(noteId) {
   const url = new URL(window.location.href);
   url.searchParams.set(NOTE_LINK_QUERY_PARAM, opaqueId);
   url.searchParams.delete(LEGACY_NOTE_LINK_QUERY_PARAM);
+  url.searchParams.delete(FOLDER_LINK_QUERY_PARAM);
   return url.toString();
 }
 
@@ -1178,6 +1350,859 @@ async function copyShareLinkForNote(noteId) {
     return;
   }
   window.prompt("Copy note link", shareLink);
+}
+
+function getRequestedFolderIdFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    const requestedFolderId = String(url.searchParams.get(FOLDER_LINK_QUERY_PARAM) || "").trim();
+    if (!requestedFolderId) {
+      return null;
+    }
+    return folderExists(requestedFolderId) ? requestedFolderId : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function buildShareLinkForFolder(folderId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set(FOLDER_LINK_QUERY_PARAM, String(folderId || ROOT_FOLDER_ID));
+  url.searchParams.delete(NOTE_LINK_QUERY_PARAM);
+  url.searchParams.delete(LEGACY_NOTE_LINK_QUERY_PARAM);
+  return url.toString();
+}
+
+function updateFolderLinkInUrl(folderId) {
+  try {
+    const url = new URL(window.location.href);
+    const normalizedFolderId = String(folderId || "").trim();
+    if (!normalizedFolderId || normalizedFolderId === ROOT_FOLDER_ID) {
+      url.searchParams.delete(FOLDER_LINK_QUERY_PARAM);
+    } else {
+      url.searchParams.set(FOLDER_LINK_QUERY_PARAM, normalizedFolderId);
+    }
+    url.searchParams.delete(NOTE_LINK_QUERY_PARAM);
+    url.searchParams.delete(LEGACY_NOTE_LINK_QUERY_PARAM);
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  } catch (_error) {
+    // Ignore URL rewrite errors.
+  }
+}
+
+async function copyShareLinkForFolder(folderId) {
+  const shareLink = buildShareLinkForFolder(folderId);
+  if (navigator?.clipboard?.writeText) {
+    await navigator.clipboard.writeText(shareLink);
+    return;
+  }
+  window.prompt("Copy folder link", shareLink);
+}
+
+function sanitizeFileStem(value, fallback = "export") {
+  const base = String(value || "").trim();
+  const normalized = base
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return normalized || fallback;
+}
+
+function downloadTextFile(fileName, content, mimeType = "text/plain;charset=utf-8") {
+  const blob = new Blob([String(content || "")], { type: mimeType });
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(href);
+}
+
+function exportFolderAsMarkdown(folderId) {
+  const folder = getFolderById(folderId);
+  if (!folder) {
+    return;
+  }
+
+  const folderScope = new Set([folderId, ...getFolderDescendantIds(folderId)]);
+  const notes = state.notes
+    .filter((note) => !isNoteInTrash(note) && folderScope.has(String(note.folderId || "")))
+    .sort((left, right) => {
+      const byFolder = getNoteFolderLabel(left.folderId).localeCompare(
+        getNoteFolderLabel(right.folderId),
+        undefined,
+        { sensitivity: "base" },
+      );
+      if (byFolder !== 0) {
+        return byFolder;
+      }
+      const byUpdatedAt = (left.updatedAt || 0) - (right.updatedAt || 0);
+      if (byUpdatedAt !== 0) {
+        return byUpdatedAt;
+      }
+      return String(left.title || "").localeCompare(String(right.title || ""), undefined, {
+        sensitivity: "base",
+      });
+    });
+
+  const exportedAtIso = new Date().toISOString();
+  const sections = [
+    `# Folder export: ${folder.name}`,
+    "",
+    `Exported at: ${exportedAtIso}`,
+    "",
+  ];
+
+  if (!notes.length) {
+    sections.push("_No notes found in this folder._", "");
+  } else {
+    for (const note of notes) {
+      sections.push(`## ${note.title || "Untitled"}`);
+      sections.push("");
+      sections.push(`Folder: ${getNoteFolderLabel(note.folderId)}`);
+      sections.push(`Updated: ${new Date(note.updatedAt || Date.now()).toISOString()}`);
+      sections.push("");
+      sections.push(String(note.content || ""));
+      sections.push("");
+      sections.push("---");
+      sections.push("");
+    }
+  }
+
+  const fileName = `${sanitizeFileStem(folder.name, "folder")}-export.md`;
+  downloadTextFile(fileName, sections.join("\n"), "text/markdown;charset=utf-8");
+}
+
+function ensureScratchExportEditor() {
+  if (scratchExportEditor) {
+    return scratchExportEditor;
+  }
+
+  if (!(document.body instanceof HTMLElement)) {
+    return null;
+  }
+
+  scratchExportHost = document.createElement("div");
+  scratchExportHost.className = "scratch-export-host";
+  scratchExportHost.setAttribute("aria-hidden", "true");
+  document.body.appendChild(scratchExportHost);
+
+  scratchExportEditor = new Editor({
+    el: scratchExportHost,
+    previewStyle: "vertical",
+    height: "1px",
+    initialEditType: "markdown",
+    initialValue: "",
+    usageStatistics: false,
+    plugins: [
+      [chart, chartPluginOptions],
+      [codeSyntaxHighlight, { highlighter: Prism }],
+      colorSyntax,
+      tableMergedCell,
+      uml,
+      sequencePlugin,
+      mermaidPlugin,
+      flowchartPlugin,
+      graphvizPlugin,
+      abcPlugin,
+      katexPlugin,
+    ],
+  });
+
+  return scratchExportEditor;
+}
+
+function buildStandaloneHtmlDocument(title, bodyHtml) {
+  const safeTitle = escapeHtml(String(title || "Export"));
+  const normalizedBody = String(bodyHtml || "");
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>${safeTitle}</title>
+    <style>
+      html, body { margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        color: #101219;
+        background: #ffffff;
+        line-height: 1.55;
+      }
+      .doc {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 24px 28px 48px;
+      }
+      .doc .toastui-editor-contents img,
+      .doc img {
+        max-width: 100%;
+        height: auto;
+      }
+      .doc table {
+        border-collapse: collapse;
+      }
+      .doc table th,
+      .doc table td {
+        border: 1px solid #d9dde7;
+        padding: 6px 8px;
+      }
+      .folder-export-note {
+        margin-top: 28px;
+        padding-top: 20px;
+        border-top: 1px solid #e5e8f0;
+      }
+      .folder-export-meta {
+        margin: 0 0 10px;
+        font-size: 12px;
+        color: #687286;
+      }
+      .folder-export-note h2 {
+        margin: 0 0 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="doc toastui-editor-contents">
+      ${normalizedBody}
+    </main>
+  </body>
+</html>`;
+}
+
+function renderMarkdownToExportHtml(markdown) {
+  const exporter = ensureScratchExportEditor();
+  if (!exporter || typeof exporter.setMarkdown !== "function" || typeof exporter.getHTML !== "function") {
+    const escaped = escapeHtml(String(markdown || ""));
+    return `<pre>${escaped}</pre>`;
+  }
+
+  try {
+    exporter.setMarkdown(String(markdown || ""), false, false, true);
+    return String(exporter.getHTML() || "");
+  } catch (error) {
+    console.error("[tui.notes.2026] failed to render markdown for html export", error);
+    return `<pre>${escapeHtml(String(markdown || ""))}</pre>`;
+  }
+}
+
+function exportNoteAsHtml(noteId) {
+  const note = state.notes.find((item) => item.id === noteId);
+  if (!note) {
+    return;
+  }
+  const bodyHtml = renderMarkdownToExportHtml(note.content || "");
+  const html = buildStandaloneHtmlDocument(note.title || "note", bodyHtml);
+  const fileName = `${sanitizeFileStem(note.title, "note")}.html`;
+  downloadTextFile(fileName, html, "text/html;charset=utf-8");
+}
+
+function exportFolderAsHtml(folderId) {
+  const folder = getFolderById(folderId);
+  if (!folder) {
+    return;
+  }
+
+  const folderScope = new Set([folderId, ...getFolderDescendantIds(folderId)]);
+  const notes = state.notes
+    .filter((note) => !isNoteInTrash(note) && folderScope.has(String(note.folderId || "")))
+    .sort((left, right) => {
+      const byFolder = getNoteFolderLabel(left.folderId).localeCompare(
+        getNoteFolderLabel(right.folderId),
+        undefined,
+        { sensitivity: "base" },
+      );
+      if (byFolder !== 0) {
+        return byFolder;
+      }
+      const byUpdatedAt = (left.updatedAt || 0) - (right.updatedAt || 0);
+      if (byUpdatedAt !== 0) {
+        return byUpdatedAt;
+      }
+      return String(left.title || "").localeCompare(String(right.title || ""), undefined, {
+        sensitivity: "base",
+      });
+    });
+
+  const sections = [];
+  sections.push(`<h1>${escapeHtml(folder.name)}</h1>`);
+  sections.push(
+    `<p class="folder-export-meta">Exported at: ${escapeHtml(new Date().toISOString())}</p>`,
+  );
+
+  if (!notes.length) {
+    sections.push("<p><em>No notes found in this folder.</em></p>");
+  } else {
+    for (const note of notes) {
+      const noteBody = renderMarkdownToExportHtml(note.content || "");
+      sections.push('<section class="folder-export-note">');
+      sections.push(`<h2>${escapeHtml(note.title || "Untitled")}</h2>`);
+      sections.push(
+        `<p class="folder-export-meta">Folder: ${escapeHtml(getNoteFolderLabel(note.folderId))} · Updated: ${escapeHtml(
+          new Date(note.updatedAt || Date.now()).toISOString(),
+        )}</p>`,
+      );
+      sections.push(noteBody);
+      sections.push("</section>");
+    }
+  }
+
+  const html = buildStandaloneHtmlDocument(
+    `${folder.name} export`,
+    sections.join("\n"),
+  );
+  const fileName = `${sanitizeFileStem(folder.name, "folder")}-export.html`;
+  downloadTextFile(fileName, html, "text/html;charset=utf-8");
+}
+
+function openShareSheet(resourceType, resourceId) {
+  if (!(elements.shareSheet instanceof HTMLElement)) {
+    return;
+  }
+  if (movePickerContext) {
+    closeMovePicker();
+  }
+  const type = resourceType === "folder" ? "folder" : "note";
+  const id = String(resourceId || "").trim();
+  if (!id) {
+    return;
+  }
+  if (type === "note" && !state.notes.some((item) => item.id === id)) {
+    return;
+  }
+  if (type === "folder" && !folderExists(id)) {
+    return;
+  }
+
+  const title =
+    type === "note"
+      ? state.notes.find((item) => item.id === id)?.title || "Note"
+      : getFolderById(id)?.name || "Folder";
+  shareSheetContext = { type, id, title };
+  if (elements.shareSheetSubtitle instanceof HTMLElement) {
+    elements.shareSheetSubtitle.textContent = title;
+  }
+  elements.shareSheet.classList.add("is-open");
+  elements.shareSheet.setAttribute("aria-hidden", "false");
+}
+
+function closeShareSheet() {
+  if (!(elements.shareSheet instanceof HTMLElement)) {
+    return;
+  }
+  shareSheetContext = null;
+  elements.shareSheet.classList.remove("is-open");
+  elements.shareSheet.setAttribute("aria-hidden", "true");
+}
+
+async function executeShareSheetAction(action) {
+  const context = shareSheetContext;
+  if (!context) {
+    closeShareSheet();
+    return;
+  }
+
+  if (action === "cancel") {
+    closeShareSheet();
+    return;
+  }
+
+  if (action === "copy-link") {
+    if (context.type === "note") {
+      await copyShareLinkForNote(context.id);
+    } else {
+      await copyShareLinkForFolder(context.id);
+    }
+    closeShareSheet();
+    return;
+  }
+
+  if (action === "export-markdown") {
+    if (context.type === "note") {
+      const note = state.notes.find((item) => item.id === context.id);
+      if (note) {
+        const fileName = `${sanitizeFileStem(note.title, "note")}.md`;
+        downloadTextFile(fileName, note.content || "", "text/markdown;charset=utf-8");
+      }
+    } else {
+      exportFolderAsMarkdown(context.id);
+    }
+    closeShareSheet();
+    return;
+  }
+
+  if (action === "export-html") {
+    if (context.type === "note") {
+      exportNoteAsHtml(context.id);
+    } else {
+      exportFolderAsHtml(context.id);
+    }
+    closeShareSheet();
+  }
+}
+
+function startMovePicker(resourceType, resourceId) {
+  closeShareSheet();
+  closeOpenedSwipeRow();
+  const type = resourceType === "folder" ? "folder" : "note";
+  const id = String(resourceId || "").trim();
+  if (!id) {
+    return;
+  }
+
+  if (type === "note") {
+    const note = state.notes.find((item) => item.id === id);
+    if (!note) {
+      return;
+    }
+    movePickerContext = {
+      type,
+      id,
+      title: note.title || "Untitled",
+    };
+    selectedFolderId =
+      note.folderId && folderExists(note.folderId) ? note.folderId : ROOT_FOLDER_ID;
+  } else {
+    const folder = getFolderById(id);
+    if (!folder) {
+      return;
+    }
+    movePickerContext = {
+      type,
+      id,
+      title: folder.name || "Folder",
+    };
+    selectedFolderId =
+      folder.parentId && folderExists(folder.parentId) ? folder.parentId : ROOT_FOLDER_ID;
+  }
+
+  renderAll();
+  setMobilePanel("folders");
+}
+
+function closeMovePicker() {
+  if (!movePickerContext) {
+    return;
+  }
+  movePickerContext = null;
+  renderAll();
+}
+
+function applyMovePickerTarget(folderId) {
+  if (!movePickerContext) {
+    return false;
+  }
+
+  const normalizedFolderId = folderId === ROOT_FOLDER_ID ? null : folderId;
+  if (movePickerContext.type === "note") {
+    const note = state.notes.find((item) => item.id === movePickerContext.id);
+    if (!note) {
+      return false;
+    }
+    moveNoteToFolder(movePickerContext.id, normalizedFolderId);
+    const nextFolderId = note.folderId || null;
+    if (nextFolderId === normalizedFolderId) {
+      movePickerContext = null;
+      renderAll();
+      setMobilePanel("notes");
+      return true;
+    }
+    return false;
+  }
+
+  const folder = getFolderById(movePickerContext.id);
+  if (!folder) {
+    return false;
+  }
+  if (!canMoveFolderToParent(folder.id, normalizedFolderId)) {
+    window.alert("Cannot move folder to this location.");
+    return false;
+  }
+  const previousParentId = folder.parentId || null;
+  moveFolder(movePickerContext.id, normalizedFolderId);
+  const nextParentId = folder.parentId || null;
+  if (previousParentId !== nextParentId) {
+    movePickerContext = null;
+    renderAll();
+    setMobilePanel("notes");
+    return true;
+  }
+  return false;
+}
+
+function renderMovePickerBar() {
+  if (!(elements.movePickerBar instanceof HTMLElement)) {
+    return;
+  }
+  if (movePickerContext) {
+    const isValid =
+      (movePickerContext.type === "note" &&
+        state.notes.some((item) => item.id === movePickerContext.id && !isNoteInTrash(item))) ||
+      (movePickerContext.type === "folder" && folderExists(movePickerContext.id));
+    if (!isValid) {
+      movePickerContext = null;
+    }
+  }
+  if (!movePickerContext) {
+    elements.movePickerBar.hidden = true;
+    elements.appShell?.classList.remove("is-move-picker");
+    return;
+  }
+
+  elements.movePickerBar.hidden = false;
+  elements.appShell?.classList.add("is-move-picker");
+  if (elements.movePickerLabel instanceof HTMLElement) {
+    elements.movePickerLabel.textContent = `${movePickerContext.title}`;
+  }
+  if (elements.movePickerNewFolderBtn instanceof HTMLButtonElement) {
+    elements.movePickerNewFolderBtn.disabled = !hasWritePermissionForSelectedFolder();
+  }
+}
+
+function promptTargetFolderIdForNoteMove(note) {
+  const options = [{ label: "All Notes (root)", folderId: null }];
+  for (const folder of state.folders) {
+    options.push({ label: folder.name, folderId: folder.id });
+  }
+
+  const messageLines = [
+    `Move note "${note.title}" to:`,
+    ...options.map((item, index) => `${index}: ${item.label}`),
+  ];
+  const input = window.prompt(messageLines.join("\n"), "0");
+  if (input === null) {
+    return undefined;
+  }
+  const selectedIndex = Number.parseInt(String(input).trim(), 10);
+  if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= options.length) {
+    window.alert("Invalid move target.");
+    return undefined;
+  }
+  return options[selectedIndex].folderId;
+}
+
+function promptTargetFolderIdForFolderMove(folder) {
+  const options = [{ label: "All Notes (root)", folderId: null }];
+  for (const candidate of state.folders) {
+    if (!canMoveFolderToParent(folder.id, candidate.id)) {
+      continue;
+    }
+    options.push({ label: candidate.name, folderId: candidate.id });
+  }
+
+  const messageLines = [
+    `Move folder "${folder.name}" to:`,
+    ...options.map((item, index) => `${index}: ${item.label}`),
+  ];
+  const input = window.prompt(messageLines.join("\n"), "0");
+  if (input === null) {
+    return undefined;
+  }
+  const selectedIndex = Number.parseInt(String(input).trim(), 10);
+  if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= options.length) {
+    window.alert("Invalid move target.");
+    return undefined;
+  }
+  return options[selectedIndex].folderId;
+}
+
+function getSwipeActionsWidth(row) {
+  const cached = Number(row.dataset.swipeWidth || 0);
+  if (Number.isFinite(cached) && cached > 0) {
+    return cached;
+  }
+  const actions = row.querySelector(".swipe-actions");
+  if (!(actions instanceof HTMLElement)) {
+    return SWIPE_OPEN_DEFAULT_WIDTH;
+  }
+  const measured = Math.ceil(actions.getBoundingClientRect().width);
+  const safeWidth = Number.isFinite(measured) && measured > 0 ? measured : SWIPE_OPEN_DEFAULT_WIDTH;
+  row.dataset.swipeWidth = String(safeWidth);
+  return safeWidth;
+}
+
+function getSwipeRowFromTarget(target) {
+  if (!(target instanceof Element)) {
+    return null;
+  }
+  const row = target.closest(".swipe-row");
+  return row instanceof HTMLElement ? row : null;
+}
+
+function getSwipeOffset(row) {
+  if (!(row instanceof HTMLElement)) {
+    return 0;
+  }
+  const raw = String(row.style.getPropertyValue("--swipe-offset") || "").trim();
+  const numeric = Number.parseFloat(raw);
+  if (Number.isFinite(numeric)) {
+    return numeric;
+  }
+  if (row.classList.contains("is-swipe-open")) {
+    return -getSwipeActionsWidth(row);
+  }
+  return 0;
+}
+
+function setSwipeRowOffset(row, offsetPx) {
+  row.style.setProperty("--swipe-offset", `${Math.round(offsetPx)}px`);
+}
+
+function closeSwipeRow(row) {
+  if (!(row instanceof HTMLElement)) {
+    return;
+  }
+  row.classList.remove("is-swipe-open", "is-swipe-dragging");
+  setSwipeRowOffset(row, 0);
+  if (openedSwipeRow === row) {
+    openedSwipeRow = null;
+  }
+}
+
+function closeOpenedSwipeRow(exceptRow = null) {
+  if (!(openedSwipeRow instanceof HTMLElement)) {
+    return;
+  }
+  if (!openedSwipeRow.isConnected) {
+    openedSwipeRow = null;
+    return;
+  }
+  if (exceptRow && openedSwipeRow === exceptRow) {
+    return;
+  }
+  closeSwipeRow(openedSwipeRow);
+}
+
+function openSwipeRow(row) {
+  if (!(row instanceof HTMLElement) || !row.isConnected) {
+    return;
+  }
+  closeOpenedSwipeRow(row);
+  const width = getSwipeActionsWidth(row);
+  row.classList.remove("is-swipe-dragging");
+  row.classList.add("is-swipe-open");
+  setSwipeRowOffset(row, -width);
+  openedSwipeRow = row;
+}
+
+function shouldEnableSwipeActions() {
+  return Boolean(elements.appShell?.classList.contains("is-single-panel"));
+}
+
+function resetSwipeStateForContainer(container) {
+  if (!(container instanceof HTMLElement)) {
+    return;
+  }
+  if (openedSwipeRow instanceof HTMLElement && container.contains(openedSwipeRow)) {
+    openedSwipeRow = null;
+  }
+  if (
+    swipeGestureState &&
+    swipeGestureState.row instanceof HTMLElement &&
+    container.contains(swipeGestureState.row)
+  ) {
+    swipeGestureState = null;
+  }
+}
+
+function handleSwipeGestureStart(event) {
+  if (!shouldEnableSwipeActions()) {
+    return;
+  }
+  if (!(event instanceof TouchEvent) || event.touches.length !== 1) {
+    return;
+  }
+
+  const target = event.target;
+  const row = getSwipeRowFromTarget(target);
+  if (!(row instanceof HTMLElement)) {
+    closeOpenedSwipeRow();
+    swipeGestureState = null;
+    return;
+  }
+
+  if ((target instanceof Element) && target.closest(".swipe-action-btn")) {
+    return;
+  }
+
+  const touch = event.touches[0];
+  const width = getSwipeActionsWidth(row);
+  const startOffset = clampNumber(getSwipeOffset(row), -width, 0);
+  closeOpenedSwipeRow(row);
+  swipeGestureState = {
+    row,
+    width,
+    startX: touch.clientX,
+    startY: touch.clientY,
+    startOffset,
+    currentOffset: startOffset,
+    horizontalIntent: false,
+  };
+}
+
+function handleSwipeGestureMove(event) {
+  const gesture = swipeGestureState;
+  if (!gesture || !(event instanceof TouchEvent) || event.touches.length !== 1) {
+    return;
+  }
+  const { row, width, startX, startY, startOffset } = gesture;
+  if (!(row instanceof HTMLElement) || !row.isConnected) {
+    swipeGestureState = null;
+    return;
+  }
+
+  const touch = event.touches[0];
+  const deltaX = touch.clientX - startX;
+  const deltaY = touch.clientY - startY;
+
+  if (!gesture.horizontalIntent) {
+    if (Math.abs(deltaX) < SWIPE_INTENT_MIN_DELTA && Math.abs(deltaY) < SWIPE_INTENT_MIN_DELTA) {
+      return;
+    }
+    if (Math.abs(deltaY) > Math.abs(deltaX)) {
+      swipeGestureState = null;
+      return;
+    }
+    gesture.horizontalIntent = true;
+    row.classList.add("is-swipe-dragging");
+  }
+
+  event.preventDefault();
+  const nextOffset = clampNumber(startOffset + deltaX, -width, 0);
+  gesture.currentOffset = nextOffset;
+  setSwipeRowOffset(row, nextOffset);
+}
+
+function finalizeSwipeGesture() {
+  const gesture = swipeGestureState;
+  swipeGestureState = null;
+  if (!gesture) {
+    return;
+  }
+  const { row, currentOffset, startOffset } = gesture;
+  if (!(row instanceof HTMLElement) || !row.isConnected) {
+    return;
+  }
+  row.classList.remove("is-swipe-dragging");
+
+  if (!gesture.horizontalIntent) {
+    return;
+  }
+
+  const wasOpen = Math.abs(startOffset) > 0;
+  const absOffset = Math.abs(currentOffset);
+  const threshold = wasOpen ? SWIPE_CLOSE_THRESHOLD_PX : SWIPE_OPEN_THRESHOLD_PX;
+  if (absOffset >= threshold) {
+    openSwipeRow(row);
+  } else {
+    closeSwipeRow(row);
+  }
+  suppressListClickUntil = Date.now() + 260;
+}
+
+function handleSwipeGestureEnd() {
+  finalizeSwipeGesture();
+}
+
+function handleSwipeGestureCancel() {
+  finalizeSwipeGesture();
+}
+
+function handleSwipeActionButtonClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  const actionBtn = target.closest(".swipe-action-btn");
+  if (!(actionBtn instanceof HTMLButtonElement)) {
+    return false;
+  }
+  const action = String(actionBtn.getAttribute("data-swipe-action") || "").trim();
+  const row = getSwipeRowFromTarget(actionBtn);
+  if (!action || !(row instanceof HTMLElement)) {
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  handleSwipeAction(action, row);
+  closeSwipeRow(row);
+  suppressListClickUntil = Date.now() + 180;
+  return true;
+}
+
+function shouldSuppressRowClick(target) {
+  if (!shouldEnableSwipeActions()) {
+    return false;
+  }
+  if (Date.now() < suppressListClickUntil) {
+    return true;
+  }
+  const row = getSwipeRowFromTarget(target);
+  if (!(row instanceof HTMLElement)) {
+    return false;
+  }
+  if (row.classList.contains("is-swipe-open")) {
+    closeSwipeRow(row);
+    suppressListClickUntil = Date.now() + 140;
+    return true;
+  }
+  closeOpenedSwipeRow();
+  return false;
+}
+
+function handleSwipeAction(action, row) {
+  if (!(row instanceof HTMLElement)) {
+    return;
+  }
+  const noteId = String(row.dataset.noteId || "").trim();
+  const folderId = String(row.dataset.folderId || "").trim();
+
+  if (action === "share-note" && noteId) {
+    openShareSheet("note", noteId);
+    return;
+  }
+
+  if (action === "rename-note" && noteId) {
+    renameNote(noteId);
+    return;
+  }
+  if (action === "move-note" && noteId) {
+    startMovePicker("note", noteId);
+    return;
+  }
+  if (action === "delete-note" && noteId) {
+    moveNoteToTrash(noteId);
+    return;
+  }
+  if (action === "restore-note" && noteId) {
+    restoreNoteFromTrash(noteId);
+    return;
+  }
+  if (action === "purge-note" && noteId) {
+    purgeNote(noteId);
+    return;
+  }
+
+  if (action === "share-folder" && folderId) {
+    openShareSheet("folder", folderId);
+    return;
+  }
+  if (action === "rename-folder" && folderId) {
+    renameFolder(folderId);
+    return;
+  }
+  if (action === "move-folder" && folderId) {
+    startMovePicker("folder", folderId);
+    return;
+  }
+  if (action === "delete-folder" && folderId) {
+    deleteFolder(folderId);
+  }
 }
 
 function getEditorSurfaceElements() {
@@ -2873,6 +3898,13 @@ async function bootstrapState() {
   stateReady = true;
   renderAll();
   ensureActiveNote();
+  const requestedFolderId = getRequestedFolderIdFromUrl();
+  if (requestedFolderId && requestedFolderId !== TRASH_FOLDER_ID && folderExists(requestedFolderId)) {
+    selectedFolderId = requestedFolderId;
+    renderAll();
+    ensureActiveNote();
+    setMobilePanel("notes");
+  }
   const requestedNoteId = getRequestedNoteIdFromUrl();
   if (requestedNoteId) {
     setActiveNote(requestedNoteId);
@@ -3578,12 +4610,14 @@ function installThemeControl(editorInstance, mediaQuery) {
 
 function renderAll() {
   renderFolders();
+  renderMovePickerBar();
   renderNotes();
   renderEditorHeader();
   applyMobilePanelView();
 }
 
 function renderFolders() {
+  resetSwipeStateForContainer(elements.folderList);
   if (
     selectedFolderId !== ROOT_FOLDER_ID &&
     selectedFolderId !== TRASH_FOLDER_ID &&
@@ -3626,23 +4660,39 @@ function buildFolderRows(parentId, depth) {
 
     rows.push(`
       <div
-        class="folder-row ${selectedFolderId === folder.id ? "is-active" : ""}"
+        class="folder-row swipe-row ${selectedFolderId === folder.id ? "is-active" : ""}"
         data-folder-id="${folder.id}"
         data-drop-folder-id="${folder.id}"
         data-draggable="folder"
         draggable="true"
         style="--depth:${depth}"
       >
-        ${
-          hasChildren
-            ? `<button class="folder-toggle ${expanded ? "is-expanded" : ""}" type="button" data-action="toggle-folder" data-folder-id="${folder.id}" aria-label="Toggle folder"><span class="folder-chevron">></span></button>`
-            : '<span class="folder-toggle-placeholder" aria-hidden="true"></span>'
-        }
-        <button class="folder-main" data-action="select-folder" data-folder-id="${folder.id}" type="button">
-          <span class="folder-icon">${ICONS.folder}</span>
-          <span class="folder-label">${escapeHtml(folder.name)}</span>
-          <span class="row-meta">${folderNoteCount(folder.id)}</span>
-        </button>
+        <div class="swipe-actions">
+          <button class="swipe-action-btn is-share" data-swipe-action="share-folder" data-folder-id="${folder.id}" type="button" title="Share folder" aria-label="Share folder">
+            <span class="ui-icon">${ICONS.share}</span>
+          </button>
+          <button class="swipe-action-btn is-rename" data-swipe-action="rename-folder" data-folder-id="${folder.id}" type="button" title="Rename folder" aria-label="Rename folder">
+            <span class="ui-icon">${ICONS.rename}</span>
+          </button>
+          <button class="swipe-action-btn is-move" data-swipe-action="move-folder" data-folder-id="${folder.id}" type="button" title="Move folder" aria-label="Move folder">
+            <span class="ui-icon">${ICONS.move}</span>
+          </button>
+          <button class="swipe-action-btn is-delete" data-swipe-action="delete-folder" data-folder-id="${folder.id}" type="button" title="Delete folder" aria-label="Delete folder">
+            <span class="ui-icon">${ICONS.delete}</span>
+          </button>
+        </div>
+        <div class="swipe-content">
+          ${
+            hasChildren
+              ? `<button class="folder-toggle ${expanded ? "is-expanded" : ""}" type="button" data-action="toggle-folder" data-folder-id="${folder.id}" aria-label="Toggle folder"><span class="folder-chevron ui-icon">${ICONS.chevronRight}</span></button>`
+              : '<span class="folder-toggle-placeholder" aria-hidden="true"></span>'
+          }
+          <button class="folder-main" data-action="select-folder" data-folder-id="${folder.id}" type="button">
+            <span class="folder-icon">${ICONS.folder}</span>
+            <span class="folder-label">${escapeHtml(folder.name)}</span>
+            <span class="row-meta">${folderNoteCount(folder.id)}</span>
+          </button>
+        </div>
       </div>
     `);
 
@@ -3655,9 +4705,13 @@ function buildFolderRows(parentId, depth) {
 }
 
 function renderNotes() {
+  resetSwipeStateForContainer(elements.noteList);
   const visibleNotes = getVisibleNotes();
   elements.notesTitle.textContent = getFolderLabel(selectedFolderId);
   elements.newNoteBtn.disabled = selectedFolderId === TRASH_FOLDER_ID;
+  if (elements.notesNewFolderBtn instanceof HTMLButtonElement) {
+    elements.notesNewFolderBtn.disabled = selectedFolderId === TRASH_FOLDER_ID;
+  }
 
   if (!visibleNotes.length) {
     elements.noteList.innerHTML = `<div class="empty-hint">No notes</div>`;
@@ -3675,13 +4729,45 @@ function renderNotes() {
             : escapeHtml(formatUpdatedAt(note.updatedAt));
 
       return `
-        <div class="note-row ${active}" data-note-id="${note.id}" ${
-          selectedFolderId === TRASH_FOLDER_ID ? "" : 'draggable="true"'
+        <div class="note-row swipe-row ${active}" data-note-id="${note.id}" ${
+          'draggable="true"'
         }>
-          <button class="note-main" data-note-id="${note.id}" type="button">
-            <span class="note-title">${escapeHtml(note.title)}</span>
-            <span class="note-meta">${meta}</span>
-          </button>
+          <div class="swipe-actions">
+            ${
+              selectedFolderId === TRASH_FOLDER_ID
+                ? `
+                  <button class="swipe-action-btn is-restore" data-swipe-action="restore-note" data-note-id="${note.id}" type="button" title="Restore note" aria-label="Restore note">
+                    <span class="ui-icon">${ICONS.restore}</span>
+                  </button>
+                  <button class="swipe-action-btn is-move" data-swipe-action="move-note" data-note-id="${note.id}" type="button" title="Move note" aria-label="Move note">
+                    <span class="ui-icon">${ICONS.move}</span>
+                  </button>
+                  <button class="swipe-action-btn is-delete" data-swipe-action="purge-note" data-note-id="${note.id}" type="button" title="Delete permanently" aria-label="Delete permanently">
+                    <span class="ui-icon">${ICONS.delete}</span>
+                  </button>
+                `
+                : `
+                  <button class="swipe-action-btn is-share" data-swipe-action="share-note" data-note-id="${note.id}" type="button" title="Share note" aria-label="Share note">
+                    <span class="ui-icon">${ICONS.share}</span>
+                  </button>
+                  <button class="swipe-action-btn is-rename" data-swipe-action="rename-note" data-note-id="${note.id}" type="button" title="Rename note" aria-label="Rename note">
+                    <span class="ui-icon">${ICONS.rename}</span>
+                  </button>
+                  <button class="swipe-action-btn is-move" data-swipe-action="move-note" data-note-id="${note.id}" type="button" title="Move note" aria-label="Move note">
+                    <span class="ui-icon">${ICONS.move}</span>
+                  </button>
+                  <button class="swipe-action-btn is-delete" data-swipe-action="delete-note" data-note-id="${note.id}" type="button" title="Delete note" aria-label="Delete note">
+                    <span class="ui-icon">${ICONS.delete}</span>
+                  </button>
+                `
+            }
+          </div>
+          <div class="swipe-content">
+            <button class="note-main" data-note-id="${note.id}" type="button">
+              <span class="note-title">${escapeHtml(note.title)}</span>
+              <span class="note-meta">${meta}</span>
+            </button>
+          </div>
         </div>
       `;
     })
@@ -3692,16 +4778,16 @@ function renderNotes() {
 
 function renderEditorHeader() {
   const note = getActiveNote();
-  const hasActiveEditableNote =
-    Boolean(note) && selectedFolderId !== TRASH_FOLDER_ID && !isNoteInTrash(note);
+  const hasEditableNote = hasActiveEditableNote();
 
-  elements.appShell.classList.toggle("editor-hidden", !hasActiveEditableNote);
+  elements.appShell.classList.toggle("editor-hidden", !hasEditableNote);
 
-  if (!hasActiveEditableNote) {
+  if (!hasEditableNote) {
     elements.noteTitleInput.value = "";
     elements.noteTitleInput.disabled = true;
     titleInputNoteId = null;
     applyAccessUiState();
+    applyMobilePanelView();
     return;
   }
 
@@ -3709,6 +4795,7 @@ function renderEditorHeader() {
   elements.noteTitleInput.value = note.title;
   titleInputNoteId = note.id;
   applyAccessUiState();
+  applyMobilePanelView();
 }
 
 function clearEditorSelection() {
@@ -3826,6 +4913,7 @@ function selectFolder(folderId) {
   } else {
     selectedFolderId = ROOT_FOLDER_ID;
   }
+  updateFolderLinkInUrl(selectedFolderId);
 
   renderAll();
   ensureActiveNote();
@@ -3858,6 +4946,10 @@ function getSelectedParentFolderId() {
 
 function createFolder() {
   if (!stateReady) {
+    return;
+  }
+  if (selectedFolderId === TRASH_FOLDER_ID) {
+    window.alert("Cannot create folders inside Trash.");
     return;
   }
   if (!hasWritePermissionForSelectedFolder()) {
@@ -4174,10 +5266,6 @@ function restoreNoteFromTrash(noteId) {
   if (!stateReady) {
     return;
   }
-  if (!hasWritePermissionForActiveNote() && noteId === activeNoteId) {
-    window.alert("You do not have permission to restore this note.");
-    return;
-  }
   const note = state.notes.find((item) => item.id === noteId);
   if (!note) {
     return;
@@ -4211,12 +5299,12 @@ function moveNoteToFolder(noteId, targetFolderId) {
   if (!stateReady) {
     return;
   }
-  if (!hasWritePermissionForActiveNote() && noteId === activeNoteId) {
-    window.alert("You do not have permission to move this note.");
-    return;
-  }
   const note = state.notes.find((item) => item.id === noteId);
   if (!note) {
+    return;
+  }
+  if (!note.deletedAt && !hasWritePermissionForActiveNote() && noteId === activeNoteId) {
+    window.alert("You do not have permission to move this note.");
     return;
   }
 
@@ -4426,6 +5514,9 @@ function handleContextAction(action) {
     if (action === "trash-note") {
       moveNoteToTrash(contextMenuTarget.id);
     }
+    if (action === "move-note") {
+      startMovePicker("note", contextMenuTarget.id);
+    }
     if (action === "restore-note") {
       restoreNoteFromTrash(contextMenuTarget.id);
     }
@@ -4579,6 +5670,15 @@ function handleFolderDropZoneDrop(event) {
 
 function wireEvents() {
   elements.newFolderBtn.addEventListener("click", createFolder);
+  elements.notesNewFolderBtn?.addEventListener("click", createFolder);
+  elements.movePickerNewFolderBtn?.addEventListener("click", () => {
+    createFolder();
+    setMobilePanel("folders");
+  });
+  elements.movePickerCancelBtn?.addEventListener("click", () => {
+    closeMovePicker();
+    setMobilePanel("notes");
+  });
   elements.toggleFoldersBtn.addEventListener("click", toggleFoldersPanel);
   elements.newNoteBtn.addEventListener("click", createNote);
   elements.notesBackBtn?.addEventListener("click", () => {
@@ -4639,8 +5739,29 @@ function wireEvents() {
   window.addEventListener("blur", stopResize);
 
   elements.folderList.addEventListener("click", (event) => {
+    handleSwipeActionButtonClick(event);
+  });
+
+  elements.noteList.addEventListener("click", (event) => {
+    handleSwipeActionButtonClick(event);
+  });
+
+  elements.folderList.addEventListener("touchstart", handleSwipeGestureStart, { passive: true });
+  elements.noteList.addEventListener("touchstart", handleSwipeGestureStart, { passive: true });
+  elements.folderList.addEventListener("touchmove", handleSwipeGestureMove, { passive: false });
+  elements.noteList.addEventListener("touchmove", handleSwipeGestureMove, { passive: false });
+  elements.folderList.addEventListener("touchend", handleSwipeGestureEnd, { passive: true });
+  elements.noteList.addEventListener("touchend", handleSwipeGestureEnd, { passive: true });
+  elements.folderList.addEventListener("touchcancel", handleSwipeGestureCancel, { passive: true });
+  elements.noteList.addEventListener("touchcancel", handleSwipeGestureCancel, { passive: true });
+
+  elements.folderList.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) {
+      return;
+    }
+    if (shouldSuppressRowClick(target)) {
+      event.preventDefault();
       return;
     }
 
@@ -4660,11 +5781,19 @@ function wireEvents() {
 
     const folderId = selectBtn.getAttribute("data-folder-id");
     if (folderId) {
+      if (movePickerContext) {
+        event.preventDefault();
+        applyMovePickerTarget(folderId);
+        return;
+      }
       selectFolder(folderId);
     }
   });
 
   elements.trashBtn.addEventListener("click", () => {
+    if (movePickerContext) {
+      return;
+    }
     selectFolder(TRASH_FOLDER_ID);
   });
 
@@ -4673,11 +5802,18 @@ function wireEvents() {
     if (!(target instanceof Element)) {
       return;
     }
+    if (shouldSuppressRowClick(target)) {
+      event.preventDefault();
+      return;
+    }
 
     const noteId =
       target.getAttribute("data-note-id") ||
       target.closest("[data-note-id]")?.getAttribute("data-note-id");
     if (!noteId || selectedFolderId === TRASH_FOLDER_ID) {
+      return;
+    }
+    if (movePickerContext) {
       return;
     }
 
@@ -4704,6 +5840,7 @@ function wireEvents() {
     if (!(target instanceof Element)) {
       return;
     }
+    closeOpenedSwipeRow();
 
     const folderRow = target.closest(".folder-row[data-folder-id]");
     if (!folderRow) {
@@ -4745,6 +5882,7 @@ function wireEvents() {
     if (!(target instanceof Element)) {
       return;
     }
+    closeOpenedSwipeRow();
 
     const noteRow = target.closest(".note-row[data-note-id]");
     if (!noteRow) {
@@ -4760,8 +5898,7 @@ function wireEvents() {
     event.preventDefault();
 
     if (selectedFolderId === TRASH_FOLDER_ID) {
-      const canMutateTrashNote =
-        authMode === "off" || (noteId === activeNoteId ? hasWritePermissionForActiveNote() : selectedFolderCapabilities.canWrite);
+      const canMutateTrashNote = true;
       const trashItems = [];
       if (canMutateTrashNote) {
         trashItems.push(
@@ -4811,6 +5948,29 @@ function wireEvents() {
     hideContextMenu();
   });
 
+  elements.shareSheet?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    if (target.closest('[data-action="close-share-sheet"]')) {
+      closeShareSheet();
+      return;
+    }
+    const button = target.closest("[data-share-action]");
+    if (!(button instanceof HTMLButtonElement)) {
+      return;
+    }
+    const action = String(button.getAttribute("data-share-action") || "").trim();
+    if (!action) {
+      return;
+    }
+    void executeShareSheetAction(action).catch((error) => {
+      console.error("[tui.notes.2026] share action failed", error);
+      window.alert(error?.message || "Share action failed.");
+    });
+  });
+
   elements.aclCancelBtn.addEventListener("click", () => {
     closeAclDialog();
   });
@@ -4854,17 +6014,24 @@ function wireEvents() {
     if (target instanceof Element && target.closest("#context-menu")) {
       return;
     }
+    if (!(target instanceof Element) || !target.closest(".swipe-row")) {
+      closeOpenedSwipeRow();
+    }
     hideContextMenu();
   });
 
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      closeOpenedSwipeRow();
       hideContextMenu();
+      closeShareSheet();
+      closeMovePicker();
       closeAclDialog();
     }
   });
 
   window.addEventListener("resize", () => {
+    closeOpenedSwipeRow();
     hideContextMenu();
     applyLayoutPrefs(false);
     renderRemotePresence();
@@ -4975,6 +6142,18 @@ function wireEvents() {
     stopPresenceHeartbeatLoop();
     stopRemoteEventsStream();
     stopResize();
+    if (scratchExportEditor && typeof scratchExportEditor.destroy === "function") {
+      try {
+        scratchExportEditor.destroy();
+      } catch (_error) {
+        // Ignore cleanup errors.
+      }
+      scratchExportEditor = null;
+    }
+    if (scratchExportHost instanceof HTMLElement) {
+      scratchExportHost.remove();
+      scratchExportHost = null;
+    }
     persistLayoutPrefs();
     flushStateWithBeacon();
   });

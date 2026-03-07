@@ -128,6 +128,65 @@ body.dark.is-resizing .panel-resizer::before {
   font-weight: 650;
 }
 
+.move-picker-bar {
+  display: grid;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid #e5e8f0;
+  background: #f3f7ff;
+}
+
+.move-picker-bar[hidden] {
+  display: none !important;
+}
+
+.move-picker-label-wrap {
+  display: grid;
+  gap: 2px;
+}
+
+.move-picker-title {
+  font-size: 11px;
+  color: #4f648d;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  font-weight: 700;
+}
+
+.move-picker-label {
+  font-size: 13px;
+  color: #1e2b44;
+  font-weight: 600;
+}
+
+.move-picker-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.move-picker-actions button {
+  border: 1px solid #c5d4f1;
+  background: #ffffff;
+  color: #2b4a7b;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.move-picker-actions button:hover:not(:disabled) {
+  border-color: #8fb2ef;
+  background: #edf4ff;
+}
+
+.move-picker-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .panel-header-actions {
   display: flex;
   align-items: center;
@@ -188,6 +247,10 @@ body.dark.is-resizing .panel-resizer::before {
   display: none;
 }
 
+.mobile-only-action {
+  display: none;
+}
+
 .ui-icon {
   display: inline-flex;
   width: 16px;
@@ -228,12 +291,13 @@ body.dark.is-resizing .panel-resizer::before {
 .folder-toggle,
 .folder-toggle-placeholder {
   margin-left: calc(8px + var(--depth) * 14px);
-  width: 16px;
-  height: 16px;
+  width: 26px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
+  align-self: center;
 }
 
 .folder-toggle {
@@ -249,11 +313,17 @@ body.dark.is-resizing .panel-resizer::before {
 }
 
 .folder-chevron {
-  display: inline-block;
-  line-height: 1;
-  font-size: 12px;
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
   transform-origin: 50% 50%;
   transition: transform 0.15s ease;
+}
+
+.folder-row .swipe-content {
+  align-items: center;
 }
 
 .folder-toggle.is-expanded .folder-chevron {
@@ -392,6 +462,87 @@ body.dark.is-resizing .panel-resizer::before {
   text-overflow: ellipsis;
 }
 
+.swipe-row {
+  --swipe-offset: 0px;
+  position: relative;
+  overflow: hidden;
+}
+
+.swipe-row .swipe-actions {
+  position: absolute;
+  inset: 0 0 0 auto;
+  display: none;
+  align-items: stretch;
+  justify-content: flex-end;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.swipe-row .swipe-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-width: 100%;
+  transform: translateX(var(--swipe-offset));
+  transition: transform 0.16s ease-out;
+  background: #fff;
+}
+
+.swipe-row.is-swipe-dragging .swipe-content {
+  transition: none;
+}
+
+.swipe-row.is-swipe-open .swipe-actions,
+.swipe-row.is-swipe-dragging .swipe-actions {
+  opacity: 1;
+}
+
+.swipe-action-btn {
+  width: 52px;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #fff;
+  pointer-events: auto;
+}
+
+.swipe-action-btn .ui-icon {
+  width: 17px;
+  height: 17px;
+}
+
+.swipe-action-btn.is-share {
+  background: #5a95ff;
+}
+
+.swipe-action-btn.is-rename {
+  background: #4f6fb8;
+}
+
+.swipe-action-btn.is-restore {
+  background: #2f8f5a;
+}
+
+.swipe-action-btn.is-move {
+  background: #55607d;
+}
+
+.swipe-action-btn.is-delete {
+  background: #c94949;
+}
+
+.swipe-action-btn:hover {
+  filter: brightness(1.06);
+}
+
 .empty-hint {
   font-size: 13px;
   color: #838aa0;
@@ -489,6 +640,17 @@ body.dark.is-resizing .panel-resizer::before {
   position: relative;
 }
 
+.scratch-export-host {
+  position: fixed;
+  left: -100000px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* Markdown paste uses an internal hidden textarea. Keep it in local coordinates
    to avoid browser viewport jumps on focus during Cmd/Ctrl+V. */
 .toastui-editor-pseudo-clipboard {
@@ -569,6 +731,82 @@ body.dark.is-resizing .panel-resizer::before {
 
 .context-menu-item.danger {
   color: #b4232c;
+}
+
+.share-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 2300;
+  display: none;
+}
+
+.share-sheet.is-open {
+  display: block;
+}
+
+.share-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 14, 25, 0.46);
+}
+
+.share-sheet-dialog {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  width: min(420px, calc(100vw - 20px));
+  border-radius: 14px;
+  border: 1px solid #d5dcee;
+  background: #fff;
+  box-shadow: 0 18px 42px rgba(16, 24, 40, 0.24);
+  overflow: hidden;
+}
+
+.share-sheet-header {
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid #e5e8f0;
+}
+
+.share-sheet-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #172136;
+}
+
+.share-sheet-subtitle {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #6e7891;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.share-sheet-actions,
+.share-sheet-footer {
+  display: grid;
+}
+
+.share-sheet-btn {
+  border: 0;
+  border-top: 1px solid #e7ebf4;
+  background: #fff;
+  color: #1d2b46;
+  padding: 12px 14px;
+  text-align: left;
+  font-size: 14px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.share-sheet-btn:hover {
+  background: #f3f7ff;
+}
+
+.share-sheet-btn.is-cancel {
+  font-weight: 650;
 }
 
 .acl-modal {
@@ -840,6 +1078,30 @@ body.dark .folder-row-trash.is-drop-target .folder-main {
   box-shadow: inset 0 0 0 1px #68b0ff;
 }
 
+body.dark .move-picker-bar {
+  border-color: #2a3040;
+  background: #202a3b;
+}
+
+body.dark .move-picker-title {
+  color: #93a6ca;
+}
+
+body.dark .move-picker-label {
+  color: #d8e2f8;
+}
+
+body.dark .move-picker-actions button {
+  border-color: #41537a;
+  background: #27344c;
+  color: #d9e5ff;
+}
+
+body.dark .move-picker-actions button:hover:not(:disabled) {
+  border-color: #6993e0;
+  background: #30466a;
+}
+
 body.dark .editor-pane {
   background: #171a20;
 }
@@ -860,6 +1122,34 @@ body.dark .context-menu-item:hover {
 
 body.dark .context-menu-item.danger {
   color: #ff8f8f;
+}
+
+body.dark .share-sheet-dialog {
+  border-color: #33415c;
+  background: #19202e;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.5);
+}
+
+body.dark .share-sheet-header {
+  border-color: #2c3750;
+}
+
+body.dark .share-sheet-header h3 {
+  color: #dce6fc;
+}
+
+body.dark .share-sheet-subtitle {
+  color: #9db0d6;
+}
+
+body.dark .share-sheet-btn {
+  border-top-color: #2d3954;
+  background: #19202e;
+  color: #dce6fc;
+}
+
+body.dark .share-sheet-btn:hover {
+  background: #273149;
 }
 
 body.dark .acl-modal-dialog {
@@ -930,6 +1220,30 @@ body.dark .acl-modal-actions button:last-child {
   background: #4f8dff;
   border-color: #4f8dff;
   color: #08122b;
+}
+
+body.dark .swipe-action-btn.is-share {
+  background: #4d7fda;
+}
+
+body.dark .swipe-action-btn.is-rename {
+  background: #45609a;
+}
+
+body.dark .swipe-action-btn.is-restore {
+  background: #2f7b57;
+}
+
+body.dark .swipe-action-btn.is-move {
+  background: #4a536b;
+}
+
+body.dark .swipe-action-btn.is-delete {
+  background: #b34a4a;
+}
+
+body.dark .swipe-row .swipe-content {
+  background: #171a20;
 }
 
 /* Export/theme split button fallback for JS-only export package */
@@ -1120,57 +1434,82 @@ body.dark .acl-modal-actions button:last-child {
   }
 }
 
-@media (max-width: 860px) {
-  .app-shell {
-    flex-direction: row;
-  }
+.app-shell.is-single-panel {
+  flex-direction: row;
+}
 
-  .panel,
-  .editor-pane {
-    width: 100%;
-    min-width: 0;
-    min-height: 0;
-    height: 100%;
-    border-right: 0;
-    border-bottom: 0;
-    max-height: none;
-  }
+.app-shell.is-single-panel .panel,
+.app-shell.is-single-panel .editor-pane {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  border-right: 0;
+  border-bottom: 0;
+  max-height: none;
+}
 
-  .folders-panel,
-  .notes-panel,
-  .editor-pane {
-    display: none;
-  }
+.app-shell.is-single-panel .folders-panel,
+.app-shell.is-single-panel .notes-panel,
+.app-shell.is-single-panel .editor-pane {
+  display: none;
+}
 
-  .app-shell.mobile-view-folders .folders-panel {
-    display: flex;
-  }
+.app-shell.is-single-panel.mobile-view-folders .folders-panel {
+  display: flex;
+}
 
-  .app-shell.mobile-view-notes .notes-panel {
-    display: flex;
-  }
+.app-shell.is-single-panel.mobile-view-notes .notes-panel {
+  display: flex;
+}
 
-  .app-shell.mobile-view-editor .editor-pane {
-    display: flex;
-  }
+.app-shell.is-single-panel.mobile-view-editor .editor-pane {
+  display: flex;
+}
 
-  .panel-resizer {
-    display: none !important;
-  }
+.app-shell.is-single-panel .panel-resizer {
+  display: none !important;
+}
 
-  .mobile-nav-btn {
-    display: inline-flex;
-  }
+.app-shell.is-single-panel .swipe-row {
+  touch-action: pan-y;
+}
 
-  #toggle-folders-btn {
-    display: none !important;
-  }
+.app-shell.is-single-panel .swipe-row .swipe-actions {
+  display: inline-flex;
+}
 
-  .editor-header-actions {
-    margin-right: 0;
-  }
+.app-shell.is-single-panel .mobile-nav-btn {
+  display: inline-flex;
+}
 
-  .theme-mode-label {
-    display: none;
-  }
+.app-shell.is-single-panel .mobile-only-action {
+  display: inline-flex;
+}
+
+.app-shell.is-single-panel #toggle-folders-btn {
+  display: none !important;
+}
+
+.app-shell.is-single-panel .editor-header-actions {
+  margin-right: 0;
+}
+
+.app-shell.is-single-panel .theme-mode-label {
+  display: none;
+}
+
+.app-shell.is-move-picker .folder-main[data-action="select-folder"] {
+  box-shadow: inset 0 0 0 1px rgba(79, 123, 214, 0.32);
+}
+
+body.dark .app-shell.is-move-picker .folder-main[data-action="select-folder"] {
+  box-shadow: inset 0 0 0 1px rgba(128, 174, 255, 0.28);
+}
+
+/* Keep space for the floating theme switcher in the top-right corner
+   so panel action buttons never overlap it in single-panel views. */
+.app-shell.is-single-panel.mobile-view-notes .notes-panel-header,
+.app-shell.is-single-panel.mobile-view-folders .folders-panel .panel-header {
+  padding-right: 112px;
 }
