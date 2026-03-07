@@ -1467,6 +1467,60 @@ body.dark .swipe-row .swipe-content {
   display: flex;
 }
 
+.app-shell.is-single-panel.mobile-view-editor #editor {
+  display: flex;
+  min-height: 0;
+}
+
+.app-shell.is-single-panel.mobile-view-editor .toastui-editor-defaultUI {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+}
+
+.app-shell.is-single-panel.mobile-view-editor .toastui-editor-defaultUI .toastui-editor-main {
+  order: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-shell.is-single-panel.is-mobile-device.mobile-view-editor
+  .toastui-editor-defaultUI
+  .toastui-editor-toolbar {
+  order: 2;
+  flex: 0 0 auto;
+  border-top: 1px solid #e5e8f0;
+  border-bottom: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+.app-shell.is-single-panel.is-mobile-device.mobile-view-editor
+  .toastui-editor-defaultUI
+  .toastui-editor-defaultUI-toolbar {
+  width: max-content;
+  min-width: 100%;
+  flex-wrap: nowrap;
+}
+
+.app-shell.is-single-panel.is-mobile-device.mobile-view-editor
+  .toastui-editor-defaultUI
+  .toastui-editor-defaultUI-toolbar
+  .toastui-editor-toolbar-group {
+  flex: 0 0 auto;
+}
+
+.app-shell.is-single-panel.is-mobile-device.mobile-view-editor
+  .toastui-editor-defaultUI
+  .toastui-editor-defaultUI-toolbar
+  .toastui-editor-toolbar-item-wrapper {
+  flex: 0 0 auto;
+}
+
 .app-shell.is-single-panel .panel-resizer {
   display: none !important;
 }
@@ -1505,6 +1559,13 @@ body.dark .swipe-row .swipe-content {
 
 body.dark .app-shell.is-move-picker .folder-main[data-action="select-folder"] {
   box-shadow: inset 0 0 0 1px rgba(128, 174, 255, 0.28);
+}
+
+body.dark
+  .app-shell.is-single-panel.is-mobile-device.mobile-view-editor
+  .toastui-editor-defaultUI
+  .toastui-editor-toolbar {
+  border-top-color: #2a3040;
 }
 
 /* Keep space for the floating theme switcher in the top-right corner

@@ -891,11 +891,26 @@ function getResponsivePanelCount(priorities) {
   return Math.min(2, priorities.length);
 }
 
+function isMobileLikeDevice() {
+  const coarsePointer =
+    typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  const userAgent = typeof navigator === "object" ? navigator.userAgent || "" : "";
+  const mobileUserAgent =
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(userAgent);
+  const ipadDesktopUserAgent =
+    /Macintosh/i.test(userAgent) &&
+    typeof navigator === "object" &&
+    Number(navigator.maxTouchPoints || 0) > 1;
+
+  return coarsePointer || mobileUserAgent || ipadDesktopUserAgent;
+}
+
 function applyMobilePanelView(preferredPanel = mobileActivePanel) {
   if (!(elements.appShell instanceof HTMLElement)) {
     return;
   }
 
+  elements.appShell.classList.toggle("is-mobile-device", isMobileLikeDevice());
   elements.appShell.classList.remove("mobile-view-folders", "mobile-view-notes", "mobile-view-editor");
   const priorities = getPanelPriorityOrder();
   const panelCount = getResponsivePanelCount(priorities);
